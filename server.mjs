@@ -300,6 +300,18 @@ const DEFAULT_SETTINGS = {
   qqConvId: '', // 收进来的消息接到哪个会话；空 = 自动建一个「QQ」
   qqCallName: '对方',
   qqNapCatDir: 'D:\\NapCatOneKey', // NapCat 装在哪：扫码登录、找二维码都从这里翻
+  // 隔离实例（C++ 宿主）：自己的 Shell 副本 + 自己的 QQ 号 + 自己的端口，跟 DSH 的 echo 实例互不相干
+  napcatShell: 'D:\\NapCatDSL\\Shell',
+  napcatLogin: '', // QQ 的 --user-data-dir；空 = 宿主默认用 <exeDir>\\login
+  napcatHost: '', // 宿主 exe；空 = 自动找 <应用目录>\\napcat\\DSLNapCatHost.exe
+  napcatStatusPath: '', // 宿主状态文件；空 = 宿主默认（<exeDir>\\state\\host-status.json），沙盒演练时指到别处
+  napcatHttpPort: 3200,
+  napcatWsPort: 3201,
+  napcatWebuiPort: 6209,
+  napcatAutoHeal: true, // 90 秒一轮自检：缺 OneBot 配置就补、登录态坏了就重置并提示重扫
+  // ---- 推送：允许应用主动往 QQ 推消息（一道权限门，关掉后推送接口一律 403）
+  pushEnabled: true,
+  pushUid: '', // 推给谁；空 = 回落到 qqUid
 };
 
 // ---------------------------------------------------------------- 小工具
@@ -531,6 +543,16 @@ async function saveSettings(patch) {
     else if (k === 'qqCallName') next.qqCallName = String(v || '').trim().slice(0, 20) || '对方';
     else if (k === 'qqPollMs') next.qqPollMs = Math.max(2000, Math.min(60000, Math.floor(Number(v) || 5000)));
     else if (k === 'qqNapCatDir') next.qqNapCatDir = String(v || '').trim().slice(0, 240) || DEFAULT_SETTINGS.qqNapCatDir;
+    else if (k === 'napcatShell') next.napcatShell = String(v || '').trim().slice(0, 240) || DEFAULT_SETTINGS.napcatShell;
+    else if (k === 'napcatLogin') next.napcatLogin = String(v || '').trim().slice(0, 240);
+    else if (k === 'napcatHost') next.napcatHost = String(v || '').trim().slice(0, 240);
+    else if (k === 'napcatStatusPath') next.napcatStatusPath = String(v || '').trim().slice(0, 240);
+    else if (k === 'napcatHttpPort') next.napcatHttpPort = Math.max(1, Math.min(65535, Math.floor(Number(v) || 3200)));
+    else if (k === 'napcatWsPort') next.napcatWsPort = Math.max(1, Math.min(65535, Math.floor(Number(v) || 3201)));
+    else if (k === 'napcatWebuiPort') next.napcatWebuiPort = Math.max(1, Math.min(65535, Math.floor(Number(v) || 6209)));
+    else if (k === 'pushUid') next.pushUid = String(v || '').replace(/[^\d]/g, '').slice(0, 20);
+    else if (k === 'pushEnabled') next.pushEnabled = v !== false;
+    else if (k === 'napcatAutoHeal') next.napcatAutoHeal = v !== false;
     else if (k === 'calendarDays') next.calendarDays = Math.max(1, Math.min(30, Math.floor(Number(v) || 3)));
     else if (k === 'safetyLevel') next.safetyLevel = ['off', 'low', 'high'].includes(v) ? v : 'off';
     else if (k === 'ttsVoice') next.ttsVoice = v === 'tide' ? 'tide' : 'stella';
@@ -612,9 +634,18 @@ function qqRemember(entry) {
   if (qqState.recent.length > 60) qqState.recent.splice(0, qqState.recent.length - 60);
 }
 
+// QQ 通道用哪个后端：默认用「隔离实例」（自己那份 delta、端口 napcatHttpPort），
+// 而不是 DSH 那个 echo 的 3000 —— 不然两边抢同一个实例。设置里 qqUseIsoInstance=false 可退回 qqBaseUrl。
+function effQqConfig(settings = {}) {
+  const base = qqConfig(settings);
+  const shell = String(settings.napcatShell || '').trim();
+  if (!shell || settings.qqUseIsoInstance === false) return base;
+  const port = Number(settings.napcatHttpPort) || 3200;
+  return { ...base, baseUrl: `http://127.0.0.1:${port}` };
+}
 async function qqStatus() {
   const settings = await loadSettings();
-  const cfg = qqConfig(settings);
+  const cfg = effQqConfig(settings);
   // 已绑定的回话会话：让前端能显示「现在往哪个对话里说」；会话被删了就标出来
   const boundId = settings.qqConvId || '';
   let bound = null;
@@ -648,7 +679,7 @@ async function qqStatus() {
 /** 发一条到 QQ（私聊优先，有群号就发群） */
 async function qqSendText(text) {
   const settings = await loadSettings();
-  const cfg = qqConfig(settings);
+  const cfg = effQqConfig(settings);
   if (!text || !String(text).trim()) throw new Error('内容为空');
   if (cfg.group) {
     const r = await sendGroup(cfg, String(text));
@@ -749,7 +780,7 @@ async function qqBindConversation(rawId) {
 /** 轮询一次：拉新消息 → 接进会话 → 让模型回 → 发回 QQ */
 async function qqPollOnce({ reply = true } = {}) {
   const settings = await loadSettings();
-  const cfg = qqConfig(settings);
+  const cfg = effQqConfig(settings);
   if (cfg.mode === 'off') return { skipped: 'mode-off' };
   if (!cfg.uid && !cfg.group) return { skipped: 'no-target' };
   const t0 = now();
@@ -884,8 +915,9 @@ async function napcatStatus(settings) {
   const dir = settings.qqNapCatDir || DEFAULT_SETTINGS.qqNapCatDir;
   const exists = existsSync(dir);
   const launcher = exists ? napcatLauncher(dir) : '';
+  // 通道总览这一栏也要认隔离实例的端口，不然卡片会一直显示「NapCat 没起来」
   let base = DEFAULT_SETTINGS.qqBaseUrl;
-  try { base = new URL(settings.qqBaseUrl || DEFAULT_SETTINGS.qqBaseUrl); } catch { base = new URL(DEFAULT_SETTINGS.qqBaseUrl); }
+  try { base = new URL(effQqConfig(settings).baseUrl || DEFAULT_SETTINGS.qqBaseUrl); } catch { base = new URL(DEFAULT_SETTINGS.qqBaseUrl); }
   const open = await portOpen(base.hostname, Number(base.port) || 80);
   let qr = null;
   if (exists) {
@@ -908,7 +940,7 @@ async function napcatStatus(settings) {
   }
   let login = { ok: false };
   if (open) {
-    try { login = await loginInfo(qqConfig(settings)); } catch (e) { login = { ok: false, error: e.message }; }
+    try { login = await loginInfo(effQqConfig(settings)); } catch (e) { login = { ok: false, error: e.message }; }
   }
   return { dir, exists, launcher, port: base.port, portOpen: open, qr, login };
 }
@@ -1008,6 +1040,275 @@ async function restartNapcat(settings) {
   };
 }
 
+// ---------------------------------------------------------------- NapCat 宿主（C++ / 隔离实例）
+// 为什么要它：一个 NapCat 实例只能挂一个 QQ 号，DSH 那边已经占了 echo（3000），
+// DeepSeek Local 这边要自己有一份 Shell 副本、自己的号、自己的端口，否则两边抢同一个实例。
+// 宿主的进程判定/端口探测/二维码读取全在 C++ 里（napcat/host.cpp），这里只负责拉起和转发。
+function napcatHostExe(settings) {
+  const custom = String(settings.napcatHost || '').trim();
+  if (custom && existsSync(custom)) return custom;
+  // 打包后：<app>\napcat\DSLNapCatHost.exe；开发态：<repo>\napcat\out\DSLNapCatHost.exe
+  const cands = [
+    path.join(ROOT, 'napcat', 'DSLNapCatHost.exe'),
+    path.join(ROOT, 'napcat', 'out', 'DSLNapCatHost.exe'),
+  ];
+  for (const p of cands) if (existsSync(p)) return p;
+  return '';
+}
+
+function napcatHostArgs(settings) {
+  const args = [];
+  const shell = String(settings.napcatShell || '').trim();
+  if (shell) args.push('--shell', shell);
+  const login = String(settings.napcatLogin || '').trim();
+  if (login) args.push('--login', login);
+  args.push('--http-port', String(settings.napcatHttpPort || 3200));
+  args.push('--ws-port', String(settings.napcatWsPort || 3201));
+  args.push('--webui-port', String(settings.napcatWebuiPort || 6209));
+  // 状态文件可指定：沙盒里拿一份伪造的 fails 去演练纠错，不碰真实例（也方便多实例并排）
+  const statusPath = String(settings.napcatStatusPath || '').trim();
+  if (statusPath) args.push('--status', statusPath);
+  return args;
+}
+
+async function napcatHostRun(settings, verb, extraArgs = []) {
+  const exe = napcatHostExe(settings);
+  if (!exe) return { ok: false, error: '没找到 DSLNapCatHost.exe（先跑 napcat/build.ps1 编译）', exe: '' };
+  const r = await runCli(exe, [verb, ...napcatHostArgs(settings), ...extraArgs], { timeoutMs: 90000 });
+  // 宿主默认输出缩进过的 JSON（多行），先整体解析；解析不了再退化成「取最后一行」
+  let data = null;
+  const text = String(r.out || '').trim();
+  try { data = JSON.parse(text); } catch {
+    try { data = JSON.parse(text.split(/\r?\n/).filter(Boolean).pop() || 'null'); } catch { data = null; }
+  }
+  if (!data) {
+    return { ok: false, error: (r.err || r.out || '宿主没有输出 JSON').slice(0, 400), exe, code: r.code };
+  }
+  return { ...data, exe, code: r.code, hostOk: r.ok };
+}
+
+/** 一份隔离实例的完整状态：宿主 JSON + 二维码 dataUrl */
+async function napcatHostState(settings) {
+  const st = await napcatHostRun(settings, 'status');
+  // fails / warning 只活在「看门狗那个进程」的内存里：单独跑一次 status 永远是 0，
+  // 所以这里把状态文件里持久化的那两样读出来盖上去，纠错才看得见真实的失败次数。
+  try {
+    const persistedPath = String(settings.napcatStatusPath || '').trim() ||
+      path.join(path.dirname(String(settings.napcatHost || napcatHostExe(settings) || '')), 'state', 'host-status.json');
+    if (persistedPath && existsSync(persistedPath)) {
+      const saved = JSON.parse(await fsp.readFile(persistedPath, 'utf8'));
+      if (saved && typeof saved === 'object') {
+        if (Number(saved.fails) > 0) st.fails = Number(saved.fails);
+        if (saved.warning) st.warning = String(saved.warning);
+        if (saved.phase && !st.phase) st.phase = String(saved.phase);
+        st.persistedAt = saved.ts || '';
+      }
+    }
+  } catch { /* 状态文件读不到就当没有 */ }
+  if (st.ok && st.qrExists && st.qrPath) {
+    try {
+      const buf = await fsp.readFile(st.qrPath);
+      const hash = crypto.createHash('sha1').update(buf).digest('hex').slice(0, 16);
+      st.qr = {
+        file: st.qrPath, mtime: st.qrMtime * 1000, size: buf.length, hash,
+        fresh: observeQr(hash, st.qrMtime * 1000),
+        dataUrl: 'data:image/png;base64,' + buf.toString('base64'),
+        servedAt: Date.now(),
+      };
+    } catch { st.qr = null; }
+  }
+  return st;
+}
+
+// ---------------------------------------------------------------- 推送（把消息主动推到 QQ）
+// 一道权限门：settings.pushEnabled（默认开）。关掉之后所有推送接口一律 403，免得误触。
+// 推的对象：优先 body 里给的 uid/group，其次 settings.pushUid，最后回落到 qqUid。
+async function pushSend({ text, uid = '', group = '', kind = 'manual' } = {}) {
+  const settings = await loadSettings();
+  if (settings.pushEnabled === false) {
+    const e = new Error('推送权限关着（设置 → QQ 推送：打开「允许主动推送」）');
+    e.code = 'PUSH_OFF';
+    throw e;
+  }
+  const body = String(text || '').trim();
+  if (!body) throw new Error('推送内容为空');
+  if (body.length > 4000) throw new Error('推送内容太长（上限 4000 字）');
+  const cfg = effQqConfig(settings);
+  const toGroup = String(group || '').replace(/[^\d]/g, '');
+  const toUid = String(uid || settings.pushUid || settings.qqUid || '').replace(/[^\d]/g, '');
+  if (!toUid && !toGroup) throw new Error('没有推送目标：先填一个 QQ 号');
+  const target = toGroup ? { ...cfg, group: toGroup, uid: '' } : { ...cfg, uid: toUid, group: '' };
+  const r = toGroup ? await sendGroup(target, body) : await sendPrivate(target, body);
+  qqState.sent += 1;
+  qqRemember({ dir: 'out', text: body, messageId: String(r.message_id || ''), to: toGroup ? 'group:' + toGroup : 'private:' + toUid, kind });
+  return {
+    ok: true,
+    to: toGroup ? 'group' : 'private',
+    uid: toGroup ? '' : toUid,
+    group: toGroup,
+    messageId: String(r.message_id || ''),
+  };
+}
+
+// ---------------------------------------------------------------- 自动纠错（隔离实例的自愈）
+// 只做「能自动判断 + 能自动修」的三件：
+//   1) 差 OneBot 配置（账号换过/配置丢了）→ 按当前账号补一份 3200/3201 的，然后重启实例；
+//   2) 进程反复起不来、二维码一直不变（登录态被写坏）→ 把登录目录改名备份、建新的，标记需要重新扫码；
+//   3) 修完推一条 QQ 消息告诉人（如果那时候通道是通的）。
+// 不做的事：不去猜模型错误、不自动改 Key。
+const healState = { at: 0, rounds: 0, actions: [], needLogin: false, lastError: '', log: [] };
+
+function healLog(line) {
+  const s = `[${new Date().toLocaleString('zh-CN', { hour12: false })}] ${line}`;
+  healState.log.push(s);
+  if (healState.log.length > 40) healState.log.splice(0, healState.log.length - 40);
+  fs.promises.appendFile(path.join(DATA, 'napcat-heal.log'), s + '\n').catch(() => {});
+}
+
+function onebotTemplate(httpPort, wsPort) {
+  return {
+    network: {
+      httpServers: [{ name: 'dsl-http', enable: true, port: httpPort, host: '127.0.0.1', enableCors: true, enableWebsocket: false, messagePostFormat: 'array', token: '' }],
+      httpSseServers: [],
+      httpClients: [],
+      websocketServers: [{ name: 'dsl-ws', enable: true, host: '127.0.0.1', port: wsPort, messagePostFormat: 'array', reportSelfMessage: false, token: '', enableForcePushEvent: true }],
+      websocketClients: [],
+      plugins: [],
+    },
+    musicSignUrl: '',
+    enableLocalFile2Url: false,
+    parseMultMsg: false,
+    imageDownloadProxy: '',
+  };
+}
+
+/** 当前已经登录过的账号（config 里 napcat_<uin>.json 的 uin） */
+function napcatUins(shell) {
+  try {
+    return fs.readdirSync(path.join(shell, 'config'))
+      .map(n => /^napcat_(\d+)\.json$/.exec(n))
+      .filter(Boolean).map(m => m[1]);
+  } catch { return []; }
+}
+
+/** 差一 OneBot 配置就补；返回补过的 uin 列表 */
+function ensureOnebotConfigs(settings) {
+  const shell = String(settings.napcatShell || '').trim();
+  if (!shell) return [];
+  const httpPort = Number(settings.napcatHttpPort) || 3200;
+  const wsPort = Number(settings.napcatWsPort) || 3201;
+  const fixed = [];
+  for (const uin of napcatUins(shell)) {
+    const f = path.join(shell, 'config', `onebot11_${uin}.json`);
+    let need = false;
+    if (!existsSync(f)) need = true;
+    else {
+      try {
+        const cur = JSON.parse(fs.readFileSync(f, 'utf8'));
+        const http = (cur?.network?.httpServers || [])[0];
+        const ws = (cur?.network?.websocketServers || [])[0];
+        if (!http || !ws || Number(http.port) !== httpPort || Number(ws.port) !== wsPort) need = true;
+      } catch { need = true; }
+    }
+    if (need) {
+      fs.writeFileSync(f, JSON.stringify(onebotTemplate(httpPort, wsPort), null, 2), 'utf8');
+      fixed.push(uin);
+      healLog(`补了 OneBot 配置：config/onebot11_${uin}.json（${httpPort}/${wsPort}）`);
+    }
+  }
+  return fixed;
+}
+
+/** 登录目录轮换：把可疑的旧目录改成 login-broken-<时间戳>，再建一个空的 */
+function rotateLoginDir(login) {
+  const dir = String(login || '').trim();
+  if (!dir) return '';
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const bak = `${dir}-broken-${stamp}`;
+  try {
+    if (existsSync(dir)) fs.renameSync(dir, bak);
+    fs.mkdirSync(dir, { recursive: true });
+    healLog(`登录目录重置：旧目录改名成 ${path.basename(bak)}（可以删），新建了空目录，需要重新扫码`);
+    return bak;
+  } catch (e) {
+    healLog(`登录目录重置失败：${e.message}`);
+    return '';
+  }
+}
+
+/**
+ * 跑一轮自检 + 自修。force=true 时不看节流，立刻动手。
+ * 返回 { actions, state }：actions 是本轮真做过的事。
+ */
+async function napcatHealOnce({ force = false } = {}) {
+  const settings = await loadSettings();
+  if (settings.napcatAutoHeal === false && !force) return { ok: true, skipped: 'auto-heal-off', actions: [] };
+  const st = await napcatHostState(settings).catch(e => ({ ok: false, error: e.message }));
+  const actions = [];
+  healState.at = Date.now();
+  healState.rounds += 1;
+  healState.actions = [];
+  healState.lastError = '';
+  if (!st || st.ok === false) {
+    healState.lastError = (st && st.error) || '读不到宿主状态';
+    // 宿主本身都没法问 → 交给计划任务/看门狗，这里不动手
+    return { ok: false, actions, state: healState };
+  }
+  if (st.loggedIn) {
+    // 在线：顺手把 OneBot 配置校一遍（有些版本会在登录后重写配置，端口可能被改回默认）
+    const fixed = ensureOnebotConfigs(settings);
+    if (fixed.length) {
+      await napcatHostRun(settings, 'stop').catch(() => null);
+      await napcatHostRun(settings, 'start').catch(() => null);
+      const a = `在线但 OneBot 配置不对，已补 (${fixed.join(',')}) 并重启实例`;
+      actions.push(a); healLog(a);
+    }
+    healState.needLogin = false;
+  } else {
+    const fails = Number(st.fails) || 0;
+    if (fails >= 2) {
+      const fixed = ensureOnebotConfigs(settings);
+      if (fixed.length) {
+        await napcatHostRun(settings, 'stop').catch(() => null);
+        await napcatHostRun(settings, 'start').catch(() => null);
+        const a = `起不来但 OneBot 配置缺，已补 (${fixed.join(',')}) 并重启`;
+        actions.push(a); healLog(a);
+      }
+    }
+    if (fails >= 4) {
+      // 反复起不来：最可能是登录 profile 被写坏（QQ 起来就退）
+      const bak = rotateLoginDir(settings.napcatLogin);
+      if (bak) {
+        await napcatHostRun(settings, 'stop').catch(() => null);
+        await napcatHostRun(settings, 'start').catch(() => null);
+        healState.needLogin = true;
+        const a = '进程反复起不来，判定登录态坏了：已重置登录目录并重启，需要重新扫码';
+        actions.push(a); healLog(a);
+      }
+    } else if (st.qrExists && !st.loggedIn) {
+      healState.needLogin = true; // 等扫码，不算故障
+    }
+  }
+  if (actions.length) {
+    healState.actions = actions;
+    if (settings.pushEnabled !== false) {
+      const text = `【自动纠错】${actions.join('；')}`;
+      pushSend({ text, kind: 'heal' }).catch(() => null); // 通道不通时静默失败
+    }
+  }
+  return { ok: true, actions, state: { ...healState, status: { running: st.running, loggedIn: st.loggedIn, fails: st.fails, phase: st.phase } } };
+}
+
+/** 后台自检定时器：默认 90 秒一轮，可用 napcatAutoHeal=false 关掉 */
+let healTimer = null;
+function startHealLoop() {
+  if (healTimer) return;
+  healTimer = setInterval(() => {
+    napcatHealOnce().catch(() => null);
+  }, 90 * 1000);
+  if (healTimer.unref) healTimer.unref();
+}
+
 // ---------------------------------------------------------------- 通道总览（插件页）
 async function channelsState() {
   const settings = await loadSettings();
@@ -1043,7 +1344,7 @@ function startQQBridge() {
     if (stopped) return;
     try {
       const settings = await loadSettings();
-      const cfg = qqConfig(settings);
+      const cfg = effQqConfig(settings);
       if (cfg.mode !== 'off' && (cfg.uid || cfg.group)) {
         if (!qqState.info || !qqState.info.ok) qqState.info = await loginInfo(cfg);
         if (cfg.mode === 'both') {
@@ -4081,7 +4382,7 @@ async function handleApi(req, res, url) {
     const st = await qqStatus();
     if (st.mode !== 'off' && (st.uid || st.group)) {
       try {
-        const info = await loginInfo(qqConfig(await loadSettings()));
+        const info = await loginInfo(effQqConfig(await loadSettings()));
         qqState.info = info;
         st.info = info;
       } catch (e) {
@@ -4093,7 +4394,7 @@ async function handleApi(req, res, url) {
 
   if (pathname === '/api/qq/test' && method === 'POST') {
     try {
-      const cfg = qqConfig(await loadSettings());
+      const cfg = effQqConfig(await loadSettings());
       const info = await loginInfo(cfg);
       qqState.info = info;
       return sendJson(res, 200, { ok: !!info.ok, info, baseUrl: cfg.baseUrl });
@@ -4155,6 +4456,44 @@ async function handleApi(req, res, url) {
       return sendJson(res, 200, startNapcat(await loadSettings()));
     } catch (e) {
       return sendJson(res, 400, { ok: false, error: e.message });
+    }
+  }
+
+  // 隔离实例（C++ 宿主）：状态 / 启动 / 停止 / 取码
+  if (pathname === '/api/napcat/host' && method === 'GET') {
+    return sendJson(res, 200, await napcatHostState(await loadSettings()));
+  }
+
+  if (pathname === '/api/napcat/host/start' && method === 'POST') {
+    const st = await napcatHostRun(await loadSettings(), 'start');
+    return sendJson(res, st.ok ? 200 : 400, st);
+  }
+
+  if (pathname === '/api/napcat/host/stop' && method === 'POST') {
+    const st = await napcatHostRun(await loadSettings(), 'stop');
+    return sendJson(res, st.ok ? 200 : 400, st);
+  }
+
+  // 自动纠错：GET 看最近一轮结论，POST 手动立刻跑一轮（force）
+  if (pathname === '/api/napcat/heal' && method === 'GET') {
+    return sendJson(res, 200, { ok: true, state: healState });
+  }
+
+  if (pathname === '/api/napcat/heal' && method === 'POST') {
+    try {
+      return sendJson(res, 200, await napcatHealOnce({ force: true }));
+    } catch (e) {
+      return sendJson(res, 400, { ok: false, error: e.message });
+    }
+  }
+
+  // 推送：允许应用主动往 QQ 推一条（权限门 pushEnabled）
+  if (pathname === '/api/push' && method === 'POST') {
+    const body = await readBody(req) || {};
+    try {
+      return sendJson(res, 200, await pushSend({ text: body.text, uid: body.uid, group: body.group, kind: body.kind || 'manual' }));
+    } catch (e) {
+      return sendJson(res, e.code === 'PUSH_OFF' ? 403 : 400, { ok: false, error: e.message, code: e.code || '' });
     }
   }
 
@@ -4845,6 +5184,7 @@ async function main() {
   } else if (argv.includes('--open')) openBrowser(url);
 
   startQQBridge();
+  startHealLoop(); // 隔离实例的自动纠错（90 秒一轮，设置里 napcatAutoHeal 可关）
 
   const shutdown = async () => {
     log('正在关闭…');

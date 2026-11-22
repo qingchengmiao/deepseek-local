@@ -32,3 +32,16 @@ temp/
 *.tmp
 *.part
 *.bak
+
+# NapCat 隔离实例的 QQ 登录态与状态文件（属于本机数据，不入库）
+napcat/login/
+napcat/state/
+
+# 隔离实例的 QQ 账号数据（junction 指向这里）
+napcat/data/
+
+# C++ 宿主的编译产物与运行时状态
+napcat/out/
+napcat/*.obj
+napcat/*.pdb
+

@@ -3324,6 +3324,14 @@ async function openQqPage() {
   const load = async () => {
     DAY.qq = await api('/api/qq/state').catch(() => ({}));
     DAY.napcat = await api('/api/napcat').catch(() => ({}));
+    // 隔离实例的目录配置从 /api/state 的设置里取（宿主 exe 由服务端自动找）
+    const st = await api('/api/state').catch(() => null);
+    if (st && st.settings) {
+      DAY.napHostConf = { shell: st.settings.napcatShell || '', login: st.settings.napcatLogin || '' };
+      DAY.pushConf = { enabled: st.settings.pushEnabled !== false, uid: st.settings.pushUid || '', heal: st.settings.napcatAutoHeal !== false };
+    } else if (!DAY.napHostConf) {
+      DAY.napHostConf = { shell: 'D:\\\\NapCatDSL\\\\Shell', login: '' };
+    }
     if (DAY.napcat && DAY.napcat.qr) {
       DAY.qrSeen = { hash: DAY.napcat.qr.hash, at: DAY.napcat.servedAt || Date.now(), count: 1 };
       DAY.qrNextAt = Date.now() + DAY.qrAutoMs;
@@ -3388,11 +3396,106 @@ async function openQqPage() {
     if (now) now.textContent = qqBindText(DAY.qq || {});
     paintCountdown();
   };
+  const paintNapHost = (st) => {
+    const box = body.querySelector('#napHostBox');
+    if (!box) return;
+    DAY.napHost = st || null;
+    if (!st) { box.innerHTML = '还没读状态，点一下「刷新状态」。'; return; }
+    if (st.ok === false && !st.running) {
+      box.innerHTML = `<b style="color:var(--warn,#c07)">没跑起来</b> · ${esc(st.error || '宿主没返回状态')}`;
+      return;
+    }
+    const bits = [];
+    bits.push(st.running ? `<b style="color:var(--ok,#0a7)">实例在跑</b>（${esc(String(st.processCount || 0))} 个进程）` : '<b>没在跑</b>');
+    bits.push(`端口 ${esc(String(st.httpPort || ''))}${st.httpUp ? ' 通' : ' 不通'}`);
+    if (st.loggedIn) bits.push(`<b style="color:var(--ok,#0a7)">已登录</b>`);
+    else if (st.qrExists) bits.push('等扫码');
+    if (st.shell) bits.push(`shell ${esc(st.shell)}`);
+    if (st.login) bits.push(`登录目录 ${esc(st.login)}`);
+    box.innerHTML = bits.join(' · ');
+    if (st.qr && st.qr.dataUrl && !st.loggedIn) {
+      box.innerHTML += `<div class="qr-box" style="margin-top:10px"><img src="${st.qr.dataUrl}" alt="二维码" style="width:220px;height:220px;image-rendering:pixelated"><div class="muted">码会自己换，换了这里会跟着变（点「看二维码」再取一次）</div></div>`;
+    }
+  };
+  const readNapHost = async () => {
+    const st = await api('/api/napcat/host', { method: 'GET' }).catch(e => ({ ok: false, error: String(e.message || e) }));
+    paintNapHost(st);
+    return st;
+  };
   body.addEventListener('click', async e => {
     const x = e.target.closest('[data-x]');
     if (!x) return;
     const act = x.dataset.x;
     try {
+      if (act === 'napHostStatus') { await readNapHost(); return; }
+      if (act === 'napHostQr') {
+        const st = await readNapHost();
+        if (!st || !st.qr) toast('还没有二维码（实例没起，或者已经登录过了）', 3200);
+        return;
+      }
+      if (act === 'napHostStart' || act === 'napHostStop') {
+        const verb = act === 'napHostStart' ? 'start' : 'stop';
+        x.disabled = true;
+        const old = x.textContent;
+        x.textContent = verb === 'start' ? '启动中…' : '停止中…';
+        try {
+          const r = await api(`/api/napcat/host/${verb}`, { method: 'POST', body: {} }).catch(e => ({ ok: false, error: String(e.message || e) }));
+          if (r.ok === false) toast((verb === 'start' ? '启动失败：' : '停止失败：') + (r.error || '未知原因'), 4200);
+          else toast(verb === 'start' ? `已拉起（${r.processCount || 0} 个进程），等它出码` : `已停（${(r.killed || []).length} 个进程）`, 3600);
+          await new Promise(r2 => setTimeout(r2, 1200));
+          await readNapHost();
+        } finally { x.disabled = false; x.textContent = old; }
+        return;
+      }
+      if (act === 'napHostSave') {
+        const shell = body.querySelector('#napShell').value.trim();
+        const login = body.querySelector('#napLogin').value.trim();
+        await api('/api/settings', { method: 'PUT', body: { napcatShell: shell || undefined, napcatLogin: login } });
+        DAY.napHostConf = { shell, login };
+        toast('存好了，下次启停就用这个目录', 3000);
+        return;
+      }
+      if (act === 'napHealNow') {
+        const box = body.querySelector('#napHealBox');
+        x.disabled = true;
+        if (box) box.textContent = '正在自检…';
+        try {
+          const r = await api('/api/napcat/heal', { method: 'POST', body: {} }).catch(e => ({ ok: false, error: String(e.message || e) }));
+          const acts = (r && r.actions) || [];
+          if (box) box.textContent = acts.length ? '这一轮修了：' + acts.join('；') : '这一轮没发现要修的东西';
+          toast(acts.length ? '自动纠错：' + acts.join('；') : '一切正常，没动手', 4200);
+          await readNapHost();
+        } finally { x.disabled = false; }
+        return;
+      }
+      if (act === 'pushSave') {
+        const enabled = body.querySelector('#pushEnabled').value === '1';
+        const uid = body.querySelector('#pushUid').value.trim();
+        await api('/api/settings', { method: 'PUT', body: { pushEnabled: enabled, pushUid: uid } });
+        DAY.pushConf = { ...(DAY.pushConf || {}), enabled, uid };
+        toast(enabled ? '推送开着' + (uid ? `，推给 ${uid}` : '，推给回话那个号') : '推送关掉了，接口会拒绝', 3200);
+        return;
+      }
+      if (act === 'pushTest') {
+        const box = body.querySelector('#pushBox');
+        x.disabled = true;
+        if (box) box.textContent = '正在发…';
+        try {
+          const uid = body.querySelector('#pushUid').value.trim();
+          const r = await api('/api/push', { method: 'POST', body: { text: '【测试】这条是 DeepSeek Local 主动推的，收到就说明推送权限通了。', uid } }).catch(e => ({ ok: false, error: String(e.message || e) }));
+          if (r.ok === false) { if (box) box.textContent = '没发出去：' + (r.error || '未知原因'); toast('推送失败：' + (r.error || ''), 4200); }
+          else { if (box) box.textContent = `已推送（${r.to === 'group' ? '群 ' + r.group : '私聊 ' + r.uid}）· messageId ${r.messageId || '-'}`; toast('推过去了', 3000); }
+        } finally { x.disabled = false; }
+        return;
+      }
+      if (act === 'pushDesktop') {
+        if (!('Notification' in window)) { toast('这个浏览器不支持桌面通知', 3200); return; }
+        const p = await Notification.requestPermission();
+        const box = body.querySelector('#pushBox');
+        if (box) box.textContent = p === 'granted' ? '桌面通知已授权：有 QQ 消息进来会弹一下。' : '桌面通知没拿到许可（' + p + '）。';
+        toast(p === 'granted' ? '桌面通知开好了' : '没给权限，桌面通知用不了', 3200);
+        return;
+      }
       if (act === 'napStart') {
         const r = await api('/api/napcat/start', { method: 'POST', body: {} });
         toast('已拉起 NapCat：' + (r.launcher || '') + '（等它出码，二维码每 2 分钟自动刷）', 3200);
@@ -3521,11 +3624,25 @@ async function openQqPage() {
     paintCountdown();
     if (DAY.qrNextAt && Date.now() >= DAY.qrNextAt) await refreshQr(false);
   }, 1000);
-  // 5 秒一次：刷收发状态（不动二维码那张图）
+  // 5 秒一次：刷收发状态（不动二维码那张图），顺便把新进来的 QQ 消息弹成桌面通知
   DAY.liveTimer = setInterval(async () => {
     if (S.view !== 'qq') return;
+    const prev = DAY.qq;
     DAY.qq = await api('/api/qq/state').catch(() => DAY.qq);
-    paintLive();
+    const seenIds = DAY.notifiedIds || (DAY.notifiedIds = new Set());
+    for (const m of (DAY.qq?.recent || [])) {
+      if (m.dir !== 'in' || !m.messageId || seenIds.has(m.messageId)) continue;
+      seenIds.add(m.messageId);
+      // 只提醒「这一轮之后新到的」，避免打开页面时把历史弹一遍
+      if (!m.at || Date.now() - new Date(m.at).getTime() > 60000) continue;
+      try {
+        if ('Notification' in window && Notification.permission === 'granted') {
+          new Notification('QQ · ' + (m.nick || m.uid || '有人'), { body: String(m.text || '').slice(0, 120), tag: 'qq-' + m.messageId });
+        }
+      } catch { /* 通知失败不影响页面 */ }
+    }
+    if (prev && DAY.qq) paintLive();
+    else paintLive();
   }, 5000);
 }
 
@@ -3751,7 +3868,44 @@ function qqPageHtml() {
   const q = DAY.qq || {};
   const nap = DAY.napcat || {};
   const hasBound = !!(q.conv && !q.conv.missing);
-  return `<div id="qqLive">${qqLiveHtml()}</div>
+  return `<div id="napHostCard" class="card-block" style="margin-top:16px">
+      <h4>隔离实例（C++ 宿主）</h4>
+      <p class="tip" style="margin:2px 0 10px">跟 DSH 那个 echo 实例完全分开：自己的 Shell 副本、自己的 QQ 号、自己的端口（OneBot ${esc(String(DAY.napHost?.httpPort || 3200))} / ${esc(String(DAY.napHost?.wsPort || 3201))}）。</p>
+      <div id="napHostBox" class="tip">还没读状态，点一下「刷新状态」。</div>
+      <div class="qq-form">
+        <div class="field" style="grid-column:1/-1"><label>Shell 目录</label><input id="napShell" value="${esc(DAY.napHostConf?.shell || 'D:\\\\NapCatDSL\\\\Shell')}" placeholder="D:\\NapCatDSL\\Shell"></div>
+        <div class="field" style="grid-column:1/-1"><label>登录目录（留空＝宿主默认 <exe 同级>\\login）</label><input id="napLogin" value="${esc(DAY.napHostConf?.login || '')}" placeholder="留空即可"></div>
+      </div>
+      <div class="cal-form-foot" style="margin-top:10px">
+        <button class="btn primary" data-x="napHostStart" title="用 C++ 宿主拉起这份隔离实例（账号、端口都跟 DSH 不共用）">启动隔离实例</button>
+        <button class="btn ghost" data-x="napHostStop" title="只停本实例的进程（按 Shell 目录 + 父链判定，不碰你自己的 QQ）">停止</button>
+        <button class="btn ghost" data-x="napHostStatus">刷新状态</button>
+        <button class="btn ghost" data-x="napHostQr">看二维码</button>
+        <button class="btn ghost" data-x="napHostSave">保存目录</button>
+        <button class="btn ghost" data-x="napHealNow" title="立刻跑一轮自检：缺 OneBot 配置就补、登录态坏了就重置并提示重扫">自动纠错</button>
+      </div>
+      <div class="tip" id="napHealBox" style="margin-top:8px">自动纠错：每 90 秒一轮，也可以在按钮上手动跑。</div>
+    </div>
+    <div id="pushCard" class="card-block" style="margin-top:16px">
+      <h4>消息推送</h4>
+      <p class="tip" style="margin:2px 0 10px">允许这台机器主动往你 QQ 推消息（提醒、自动纠错结论、任务完成）。关掉之后推送接口一律拒绝。</p>
+      <div class="qq-form">
+        <div class="field"><label>允许主动推送</label>
+          <select id="pushEnabled">
+            <option value="1"${DAY.pushConf?.enabled === false ? '' : ' selected'}>开着</option>
+            <option value="0"${DAY.pushConf?.enabled === false ? ' selected' : ''}>关着</option>
+          </select>
+        </div>
+        <div class="field"><label>推给谁（QQ 号，留空＝回话那个号）</label><input id="pushUid" value="${esc(DAY.pushConf?.uid || '')}" placeholder="留空＝用上面回话的号"></div>
+      </div>
+      <div class="cal-form-foot" style="margin-top:10px">
+        <button class="btn primary" data-x="pushSave">保存推送设置</button>
+        <button class="btn ghost" data-x="pushTest" title="往上面那个号发一条测试（走隔离实例的 OneBot）">发一条测试</button>
+        <button class="btn ghost" data-x="pushDesktop" title="浏览器通知权限：有 QQ 消息进来时在桌面弹一下">授权桌面通知</button>
+      </div>
+      <div class="tip" id="pushBox" style="margin-top:8px">还没推过。</div>
+    </div>
+    <div id="qqLive">${qqLiveHtml()}</div>
     <div class="card-block" style="margin-top:16px">
       <h4>回话用哪个会话</h4>
       <p class="tip" style="margin:2px 0 10px">QQ 收进来的消息写进这个对话；模式选「收发」时，模型就在这个对话里接着答。</p>

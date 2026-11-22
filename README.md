@@ -428,6 +428,74 @@ powershell -ExecutionPolicy Bypass -File tools\install-shortcut.ps1   # 重建�
 
 ---
 
+## 隔离实例：一个 QQ 号一个 NapCat，谁也不抢谁（2026-11-23）
+
+一个 NapCat 实例只能挂一个号，DSH 那边已经占了 echo（OneBot 3000）。这边要自己有一套：
+复制一份 Shell、用自己的号、自己的端口，用 C++ 宿主管启停。**两边互不干扰**，而不是把 DSH 那份改一改。
+
+- 宿主：`napcat/host.cpp` → 编译成 `napcat/out/DSLNapCatHost.exe`（`napcat/build.ps1` 编译，顺手拷进打包目录）。DLL 一个不带，只用系统 API。
+- 命令：`status` / `start` / `stop` / `run`（看门狗）/ `qr`。参数：`--shell` `--login` `--http-port` `--ws-port` `--webui-port` `--wait-qr`。状态写 `state/host-status.json`。
+- 端口：OneBot **3200**（HTTP）/ **3201**（WS）/ WebUI **6209**；DSH 那边照旧 3000/3001/6099。
+- Shell 副本：`D:\NapCatDSL\Shell`（从 `D:\NapCatOneKey\NapCat.52230.Shell` 整份复制，原目录原样不动＝备份）。
+- 账号数据目录：QQ 的聊天数据本来落在 `Documents\Tencent Files\<号>\`（按号分目录），
+  这里把 delta 那份（`3810187208`，219 MB）整体挪到了 `napcat\data\3810187208`，
+  原位置留一个目录联接（junction）指过去 —— QQ 照旧按原路径读写，字节全在 DSL 目录里。
+  实测登录后新数据立刻写进 `napcat\data\3810187208\nt_qq\...`，从原路径也能看到同一个文件。
+  换机器/重装时把新号的数据目录照同样办法搬一次就行。
+- 登录目录：`--user-data-dir` 指到自己的文件夹（默认 `<exe 同级>\login`，开发态是 `napcat\login`）。
+  这一条是整套隔离的关键——QQ 默认读系统共享的 `%APPDATA%\QQ`，一启动就快速登录 echo，永远不出二维码；
+  给它一份干净的 profile，码才会出来。QQ 的聊天数据另落在 `Documents\Tencent Files\<号>\nt_qq`，那层还归系统。
+- UI：QQ 页最上面「隔离实例（C++ 宿主）」卡片——状态行（进程数/端口/登录）、启动、停止、刷新状态、看二维码、保存 Shell 与登录目录。
+- 接口：`GET /api/napcat/host`、`POST /api/napcat/host/start`、`POST /api/napcat/host/stop`。
+- 实测（2026-11-23）：delta（3810187208）扫码登录 → 3200/3201/6209 全通 → `get_login_info` 回 `{"user_id":3810187208,"nickname":"delta"}` → `send_private_msg` 发到 3979605697 成功（`message_id 164640040`）。
+- 坑：**别 `taskkill /im QQ.exe`**，那会连用户自己的 QQ 一起杀；宿主的进程判定只认「路径在 Shell 目录下」+「父链传播」，且限定在 `QQ.exe`/`NapCatWinBootMain.exe` 两个名字。
+  登录成功后也别随便 kill——QQ 的会话要落盘，强杀可能把登录 profile 写坏，表现是「QQ 起来 20 秒就自己退出」，这时只能把登录目录删掉重扫。
+
+### 长期托管怎么做的（2026-11-23）
+
+- 托管入口：`%LOCALAPPDATA%\DeepSeekLocal\napcat-host\host-run.cmd` → 跑 `DSLNapCatHost.exe run`（前台看门狗）。
+  这个 exe 故意放在**工作区外面**：放在 DSH 工作区里时进程表会被裁剪（只看得见十几个进程），看门狗会误判「实例没跑」而反复拉起第二份。放外面就正常（实测 `processCount 6`）。
+- 计划任务 `DeepSeekLocal_NapCatHost`：登录时触发（延迟 30 秒）、以当前用户最高权限、`IgnoreNew` 单实例、无运行时长上限、失败重试 3 次。
+  它跟应用是解耦的：应用开着不开着都不影响 QQ 通道。停掉就 `Disable-ScheduledTask -TaskName DeepSeekLocal_NapCatHost`。
+- 看门狗行为：进程没了按 3→6→12→24→48→60 秒退避拉起；**连续失败 6 次退到 10 分钟一轮**，并在状态文件里写 `warning`
+  （`反复起不来：可能是登录态被写坏…`），不无限快速重启刷屏。恢复登录后 `fails` 归零、`warning` 清空。
+- 应用侧设置项 `napcatHost` 指向上面那个部署副本，所以卡片上的进程数/登录态和看门狗看到的一致（工作区那份 exe 看不全）。
+- 自检顺序：`Get-ScheduledTask DeepSeekLocal_NapCatHost` → `host-status.json` 里看 `phase`（`online` / `waiting-login` / `restarting`）。
+
+### 消息推送 + 自动纠错（2026-11-23）
+
+两块都在 QQ 页上，接口是 `POST /api/push` 与 `GET|POST /api/napcat/heal`。
+
+**消息推送**（`pushEnabled` 默认开、`pushUid` 存推给谁）——这是「这台机器主动找你」的通道，不是等你去翻页面：
+
+- 权限门在服务端：`GET|PUT /api/settings` 里关掉 `pushEnabled`，`POST /api/push` 一律 **403 `PUSH_OFF`**，不是前端藏按钮糊弄人。
+- 目标优先级：请求体 `uid` → `pushUid` → `qqUid`；群聊传 `group`。
+- 用处：任务完成、长活跑完、自动纠错结论。走的是隔离实例那条 OneBot，跟回复同一个通道。
+- 桌面通知另有一层：QQ 页开着时，新进来的私聊会弹系统通知（60 秒内的才算新，按 `messageId` 去重）。浏览器/Electron 首次要 `授权桌面通知` 点一下。
+
+**自动纠错**（`napcatAutoHeal` 默认开，90 秒一轮，也能在卡片上手动跑一次）：
+
+- 在线时不动手，只校验 OneBot 配置（端口不对/文件缺了就按模板重写）。
+- 连续起不来 2 次：补 OneBot 配置后重启实例。
+- 连续起不来 4 次：**轮换登录目录**（`login` 改名 `login-broken-<时间戳>`，建新的空目录），并把 `needLogin` 标出来等你扫码。
+- 已经出码但没登录：只记「等扫码」，不算故障，不会为此反复重启。
+- 有动作就推一条「【自动纠错】…」到你 QQ（推不通就静默，不影响修复）。
+- 日志在 `data/napcat-heal.log`。
+
+**它修不了什么**：强杀写坏的登录态*有时*能靠轮换目录救回来（等于让你重扫），但**已经丢掉的会话它救不回来**；真遇到「QQ 起来就退」先看卡片上的 warning，再看 `host-status.json` 的 `fails`。
+
+**怎么演练「反复起不来」而不碰真实例**（2026-11-23 实际这样跑过一遍）：
+
+1. 起一个沙盒实例：`$env:DSAPP_DATA='<repo>\data\_healsandbox'`、`$env:PORT='8811'`、先写 `{"autoImport":false}`。
+2. 造三样假的：假 Shell（`shell\config\napcat_900001.json` + 端口写成 3000 的 `onebot11_900001.json`）、假登录目录（空目录）、假状态文件（`{"fails":5,"loggedIn":false,"phase":"restarting"}`）。
+3. `PUT /api/settings` 把 `napcatShell` / `napcatLogin` / `napcatStatusPath` 指到这三样，`pushEnabled:false`（免得演练时真推你 QQ）。
+4. 打 `POST /api/napcat/heal`，预期两条动作：`起不来但 OneBot 配置缺，已补 (900001) 并重启`、`进程反复起不来…已重置登录目录并重启，需要重新扫码`；
+   然后看 `onebot11_900001.json` 的端口变成 3999/3998（按设置里的端口重写）、`login` 旁边多出 `login-broken-<时间戳>`、新 `login` 是空目录。
+
+这套演练暴露过一个真问题，已经修掉：`fails` 只活在超管进程的内存里，而 `status` 是**另起一个进程**跑 —— 它既读不到 `fails`（永远 0，纠错分支等于死代码），又会在返回后**回写状态文件把它清成 0**。现在 `status` 改成只读：开跑先 `LoadPersistedStatus()` 从状态文件把 `fails`/`warning` 读回来，且不再 `WriteStatus`。
+
+---
+
 ## 几个实现上的坑（改代码时留意）
 
 - **带 `tools` 的请求必须回传历轮的 `reasoning_content`，否则 400**；不带 tools 时反而不能传（传了也被忽略）。所以 `buildMessages` 只在联网时才把思考内容拼回历史。
