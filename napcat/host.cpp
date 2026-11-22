@@ -39,6 +39,7 @@
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "psapi.lib")
+#pragma comment(lib, "user32.lib")
 #pragma comment(lib, "wbemuuid.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "oleaut32.lib")
@@ -813,6 +814,11 @@ int wmain(int argc, wchar_t** argv) {
   Options o;
   ParseArgs(argc, argv, o);
   FillDefaults(o);
+
+  // 别让黑框在用户眼前闪：本进程是 CUI，被计划任务/快捷方式拉起时会带一个控制台窗口。
+  // 立刻把它藏起来（控制台句柄还在，stdout 照样能写；NapCatWinBootMain 也继承这个隐藏控制台，
+  // 所以它不会再自己开一个可见窗口）。
+  if (HWND con = GetConsoleWindow()) ShowWindow(con, SW_HIDE);
 
   if (o.command == L"help" || o.command == L"--help") {
     PrintHelp();

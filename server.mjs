@@ -949,7 +949,7 @@ function startNapcat(settings) {
   const dir = settings.qqNapCatDir || DEFAULT_SETTINGS.qqNapCatDir;
   const launcher = napcatLauncher(dir);
   if (!launcher) throw new Error(`没在 ${dir} 里找到启动器（扫码登录.bat / start-napcat-A.bat）`);
-  const child = spawn('cmd.exe', ['/c', launcher], { cwd: dir, detached: true, stdio: 'ignore', windowsHide: false });
+  const child = spawn('cmd.exe', ['/c', launcher], { cwd: dir, detached: true, stdio: 'ignore', windowsHide: true });
   child.unref();
   return { ok: true, launcher };
 }
@@ -5048,7 +5048,7 @@ async function serveStatic(req, res, pathname) {
 
 function openBrowser(url) {
   try {
-    if (process.platform === 'win32') spawn('cmd', ['/c', 'start', '', url], { detached: true, stdio: 'ignore' }).unref();
+    if (process.platform === 'win32') spawn('cmd', ['/c', 'start', '', url], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
     else if (process.platform === 'darwin') spawn('open', [url], { detached: true, stdio: 'ignore' }).unref();
     else spawn('xdg-open', [url], { detached: true, stdio: 'ignore' }).unref();
   } catch {}

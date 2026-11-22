@@ -494,6 +494,19 @@ powershell -ExecutionPolicy Bypass -File tools\install-shortcut.ps1   # 重建�
 
 这套演练暴露过一个真问题，已经修掉：`fails` 只活在超管进程的内存里，而 `status` 是**另起一个进程**跑 —— 它既读不到 `fails`（永远 0，纠错分支等于死代码），又会在返回后**回写状态文件把它清成 0**。现在 `status` 改成只读：开跑先 `LoadPersistedStatus()` 从状态文件把 `fails`/`warning` 读回来，且不再 `WriteStatus`。
 
+### 为什么不会再弹黑框（2026-11-23）
+
+命令行窗口一闪一闪很碍事，四处都堵了：
+
+1. **计划任务走 `wscript.exe //B host-run.vbs`**，vbs 里 `WScript.Shell.Run(..., 0, False)` —— 窗口样式 0，从头就没有窗口。之前任务是 `cmd.exe /c host-run.cmd`，那个 cmd 窗口会一直挂在桌面上（不是闪一下，是赖着不走）。
+2. **宿主自己藏控制台**：`DSLNapCatHost.exe` 是 CUI 程序，`wmain` 一进来就 `ShowWindow(GetConsoleWindow(), SW_HIDE)`。手动双击 `host-run.cmd` 时窗口也会立刻消失；更关键的是 `NapCatWinBootMain.exe` 是 CUI、会继承这个隐藏控制台，所以它不会再自己开一个可见窗口（QQ.exe 本身是 GUI，不受影响）。
+3. **应用里所有子进程都带 `windowsHide: true`**：`runCli`（宿主 status / ollama / ffmpeg）、`startNapcat`（老的 `cmd /c 扫码登录.bat` 路径，之前是 `false`）、`execFile`（模型下载）、`openBrowser` 的 `cmd /c start`。
+4. 老的「重启 NapCat」路径同理走 `startNapcat`，已经一起静默。
+
+验证方法（可复现）：用 `EnumWindows` 每 60ms 采样一次可见的 `ConsoleWindowClass` 窗口，同时连打 128 次 `/api/napcat/host`、再整轮重启应用并连点「启动隔离实例」—— 两次采样捕获到的可见控制台窗口都是 **0**。
+
+例外：`启动演示.cmd`、`停止演示.cmd` 这类**你自己双击**的脚本仍然会开窗口（故意的，要能看见它干了什么）。
+
 ---
 
 ## 几个实现上的坑（改代码时留意）
