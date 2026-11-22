@@ -13,6 +13,18 @@ const convCount = async () => (await (await fetch(BASE + '/api/state')).json()).
 
 console.log(`目标: ${BASE}`);
 const before = await convCount();
+// 附件接口要求已填 Key；无 Key 的隔离实例自己塞一个假 Key（有真 Key 的实例绝不动）
+{
+  const st = await (await fetch(BASE + '/api/state')).json();
+  if (!st.settings?.apiKey) {
+    await fetch(BASE + '/api/settings', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ apiKey: 'sk-local-test-key' }),
+    });
+    console.log('（实例没 Key，测试临时塞了一个假 Key）');
+  }
+}
 
 const { cdp, ev, waitFor, close } = await launch({ width: 1360, height: 900, port: 9353 });
 try {

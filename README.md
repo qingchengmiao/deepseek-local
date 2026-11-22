@@ -418,6 +418,17 @@ powershell -ExecutionPolicy Bypass -File tools\install-shortcut.ps1   # 重建�
 
 `media-smoke.mjs` 需要本机 ffmpeg；测试素材（9 秒测试视频、4 秒测试音）缺了会自己现场造。
 
+### 一把跑完全部（2026-11-23 加）
+
+```
+pwsh -NoProfile -File tools\_run-suite.ps1 -Base http://127.0.0.1:8820 -Tests smoke,integration,dom-check
+pwsh -NoProfile -File tools\_run-fresh.ps1 -Tests qq-test,context-test,route-test,tune-test,link-test
+```
+
+`_run-suite.ps1` 打一个已经跑着的实例（`-Data` 顺手把 `DSAPP_DATA` 传给子测试，`context-test` 认这个）；`_run-fresh.ps1` 给**每个测试单独起一个全新隔离实例**，跑完就拆——`route-test`/`tune-test` 会往实例里写 mock Key，不隔离会连累后面的测试被 `_guard.mjs` 拦下（这条坑踩过两次）。
+
+分三堆跑才全绿：**静态/无状态那批**（lint、check-assets、test-md、model-fallback、model-pull、zip-import、import-preview、qq-bind、import-page）随便挂哪都行；**要数据的**（smoke、integration、calendar、media-smoke）必须挂在 `conv>0` 的实例上；**要真 Key 的**（chat-drop、app-check）得打日常那个 8787——附件会走上游文档解析，假 Key 会 502。
+
 ## 验到什么程度
 
 2026-11-21 用真 Key 逐个跑过：联网搜索、深度思考（低/高/最高）、读链接、图片理解（让它读一张截图上的按钮文字）、PDF 文档问答、语音合成 → 语音识别闭环、视频解析（转写 + 6 帧，问「这段语音说了什么」答得对）、继续生成、内容安全开关、`deepseek-v4-pro` 纯文本。

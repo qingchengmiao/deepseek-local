@@ -640,6 +640,11 @@ function effQqConfig(settings = {}) {
   const base = qqConfig(settings);
   const shell = String(settings.napcatShell || '').trim();
   if (!shell || settings.qqUseIsoInstance === false) return base;
+  // 用户/测试显式配过 qqBaseUrl（跟默认值不同）就以他为准：不然测试打假后端、
+  // 或者有人故意接别的 OneBot，都会被这里强行改回隔离实例。
+  const explicit = String(settings.qqBaseUrl || '').trim();
+  const dflt = String(DEFAULT_SETTINGS.qqBaseUrl || '').trim();
+  if (explicit && explicit !== dflt) return base;
   const port = Number(settings.napcatHttpPort) || 3200;
   return { ...base, baseUrl: `http://127.0.0.1:${port}` };
 }

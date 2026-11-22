@@ -44,6 +44,14 @@ const { cdp, ev, waitFor, close } = await launch({ width: 1280, height: 900, por
 try {
   await cdp('Page.navigate', { url: BASE + '/' });
   await waitFor("document.documentElement.dataset.ready === '1'", 15000);
+  // 没有默认打开的对话（或打开的是空对话）时，先点一条有消息的会话，保证正文里有字可选
+  if (!(await ev(`document.querySelectorAll('.msg').length`))) {
+    await ev(`(() => { const it = document.querySelector('.conv-item'); if (it) it.click(); return true; })()`);
+    for (let i = 0; i < 25; i += 1) {
+      await sleep(200);
+      if (await ev(`document.querySelectorAll('.bubble').length`)) break;
+    }
+  }
   // 正文区加载完会自己平滑滚到底；等 scrollTop 稳定再动手，否则选区会被滚动带跑
   let last = -1;
   for (let i = 0; i < 20; i += 1) {

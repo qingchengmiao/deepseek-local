@@ -344,7 +344,7 @@ try {
     check('QQ 整页打开', /QQ/.test(await ev(`document.querySelector('#pageTitle').textContent`)));
     check('QQ 页有状态区', await ev(`!!document.querySelector('#qqLive .pill')`));
     check('QQ 页有扫码登录区（二维码或启动按钮）',
-      await ev(`!!document.querySelector('.qr-box img, [data-x="napStart"]')`));
+      await ev(`!!document.querySelector('.qr-box img, [data-x="napStart"], [data-x="napHostQr"]')`));
     check('QQ 页有模式/地址/发送框',
       await ev(`!!document.querySelector('#qqMode') && !!document.querySelector('#qqBase') && !!document.querySelector('#qqText')`));
     check('QQ 模式有三档', (await ev(`document.querySelectorAll('#qqMode option').length`)) >= 3);

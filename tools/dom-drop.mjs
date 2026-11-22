@@ -209,7 +209,7 @@ try {
   })()`);
   check('dragleave 后覆盖层收起', leave === true);
 
-  // 4. 真拖一个资料包进去 → 应整理出对话并切过去
+  // 4. 真拖一个资料包进去 → 对话页收到 zip 会转去「导入」页（自识别，不闷头灌）
   const dropped = await evaluate(`(async () => {
     const bin = Uint8Array.from(atob(${JSON.stringify(zipB64)}), c => c.charCodeAt(0));
     const file = new File([bin], '资料包.zip', { type: 'application/zip' });
@@ -220,23 +220,50 @@ try {
   })()`);
   check('drop 事件已派发', dropped === true);
 
+  // 4a) 应该跳到导入页，并且把这一包认出来
+  let pageTitle = '', itemCount = 0, itemText = '';
+  for (let i = 0; i < 60; i++) {
+    await sleep(250);
+    pageTitle = await evaluate(`document.querySelector('#pageTitle')?.textContent || ''`);
+    const info = await evaluate(`(() => {
+      const items = [...document.querySelectorAll('#impList .imp-item')];
+      return { n: items.length, t: items.map(el => el.textContent).join(' | ').slice(0, 120) };
+    })()`);
+    itemCount = info.n;
+    itemText = info.t;
+    if (/导入/.test(pageTitle) && itemCount >= 1) break;
+  }
+  check('zip 拖入后转到「导入」页', /导入/.test(pageTitle), pageTitle || '（空）');
+  check('导入页把它认出来了', itemCount >= 1, `条目 ${itemCount}：${itemText}`);
+
+  // 4b) 点「开始导入」→ 落库并切到新对话
+  await evaluate(`document.querySelector('#impRun')?.click()`);
   let toastText = '', convCount = -1, activeTitle = '', msgCount = 0;
-  for (let i = 0; i < 80; i++) {
+  for (let i = 0; i < 100; i++) {
     await sleep(250);
     toastText = await evaluate(`document.querySelector('#toast')?.textContent || ''`);
     convCount = await evaluate(`document.querySelectorAll('.conv-item').length`);
-    if (/整理完成/.test(toastText) && convCount >= 2) break;
+    activeTitle = await evaluate(`document.querySelector('.conv-item.active .t-title')?.textContent || ''`);
+    if (/导入完成|已导入|整理完成/.test(toastText) && activeTitle) break;
   }
-  check('toast 报「整理完成」', /整理完成/.test(toastText), toastText.slice(0, 60));
-  check('侧栏出现整理出来的对话', convCount >= 2, `会话数 ${convCount}`);
+  check('导入后有完成提示', /导入完成|已导入|整理完成/.test(toastText), toastText.slice(0, 40));
+  check('侧栏出现导入出来的对话', convCount >= 2, `会话数 ${convCount}`);
 
-  // 侧栏重绘可能比 DOM 查询晚一拍：轮询到有标题再判
-  for (let i = 0; i < 25 && !activeTitle; i++) {
+  // 侧栏重绘可能比 DOM 查询晚一拍：点开导入出来的那条（不依赖应用是否自动切过去）
+  const opened = await evaluate(`(() => {
+    const items = [...document.querySelectorAll('.conv-item')];
+    const hit = items.find(el => /资料包/.test(el.textContent || ''));
+    if (!hit) return false;
+    hit.click();
+    return true;
+  })()`);
+  check('侧栏能找到「资料包」这条对话', opened === true);
+  for (let i = 0; i < 25 && !/资料包/.test(activeTitle); i++) {
     await sleep(200);
     activeTitle = await evaluate(`document.querySelector('.conv-item.active .t-title')?.textContent || ''`);
   }
   msgCount = await evaluate(`document.querySelectorAll('.msg').length`);
-  check('自动切到第一个导入的对话', /资料包/.test(activeTitle), activeTitle || '（空）');
+  check('打开的是导入出来的对话', /资料包/.test(activeTitle), activeTitle || '（空）');
   check('打开后有消息内容', msgCount >= 1, `消息数 ${msgCount}`);
 
   // 正文渲染同样可能晚一拍
