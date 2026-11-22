@@ -498,7 +498,7 @@ powershell -ExecutionPolicy Bypass -File tools\install-shortcut.ps1   # 重建�
 
 命令行窗口一闪一闪很碍事，四处都堵了：
 
-1. **计划任务走 `wscript.exe //B host-run.vbs`**，vbs 里 `WScript.Shell.Run(..., 0, False)` —— 窗口样式 0，从头就没有窗口。之前任务是 `cmd.exe /c host-run.cmd`，那个 cmd 窗口会一直挂在桌面上（不是闪一下，是赖着不走）。
+1. **计划任务走 `wscript.exe //B host-run.vbs`**，vbs 里 `WScript.Shell.Run(..., 0, True)` —— 窗口样式 0，从头就没有窗口；`True` 是等它跑完，外面再套一层循环（退出码 3 = 已经在跑，就等 60 秒；其余 10 秒后重来），所以任务常驻 `Running`，宿主崩了自己会回来。之前任务是 `cmd.exe /c host-run.cmd`，那个 cmd 窗口会一直挂在桌面上（不是闪一下，是赖着不走）。
 2. **宿主自己藏控制台**：`DSLNapCatHost.exe` 是 CUI 程序，`wmain` 一进来就 `ShowWindow(GetConsoleWindow(), SW_HIDE)`。手动双击 `host-run.cmd` 时窗口也会立刻消失；更关键的是 `NapCatWinBootMain.exe` 是 CUI、会继承这个隐藏控制台，所以它不会再自己开一个可见窗口（QQ.exe 本身是 GUI，不受影响）。
 3. **应用里所有子进程都带 `windowsHide: true`**：`runCli`（宿主 status / ollama / ffmpeg）、`startNapcat`（老的 `cmd /c 扫码登录.bat` 路径，之前是 `false`）、`execFile`（模型下载）、`openBrowser` 的 `cmd /c start`。
 4. 老的「重启 NapCat」路径同理走 `startNapcat`，已经一起静默。
