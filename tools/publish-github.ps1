@@ -45,14 +45,28 @@ $remote = "https://github.com/$Owner/$Repo.git"
 if ($LASTEXITCODE -ne 0) { throw "推送失败（检查 gh auth login 是否包含 repo 权限）" }
 
 # 3) 发 Release 并传附件
-$assets = @(
-  'DeepSeekLocal-Setup-1.0.1.exe',
-  'DeepSeek-Local-1.0.1-source.zip',
-  'DeepSeek-Local-1.0.1.bundle',
-  'DeepSeek-Local-功能介绍.pdf',
-  'DeepSeek-Local-功能演示.pdf',
-  'SHA256SUMS.txt'
-) | ForEach-Object { Join-Path $rel $_ } | Where-Object { Test-Path $_ }
+# 注意：两个 PDF 的源文件名是中文，GitHub 的 uploads API 对 CJK 文件名会回 404，
+# 所以先复制到临时目录改成 ASCII 名再上传（SHA256SUMS.txt 里也用 ASCII 名）。
+$stage = Join-Path $env:TEMP 'dsrel_ascii'
+Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
+New-Item -ItemType Directory $stage | Out-Null
+
+$map = @(
+  @('DeepSeekLocal-Setup-1.0.1.exe',   'DeepSeekLocal-Setup-1.0.1.exe'),
+  @('DeepSeek-Local-1.0.1-source.zip', 'DeepSeek-Local-1.0.1-source.zip'),
+  @('DeepSeek-Local-1.0.1.bundle',     'DeepSeek-Local-1.0.1.bundle'),
+  @('DeepSeek-Local-功能介绍.pdf',      'DeepSeek-Local-Features.pdf'),
+  @('DeepSeek-Local-功能演示.pdf',      'DeepSeek-Local-Feature-Demo.pdf'),
+  @('SHA256SUMS.txt',                  'SHA256SUMS.txt')
+)
+$assets = @()
+foreach ($m in $map) {
+  $src = Join-Path $rel $m[0]
+  if (-not (Test-Path $src)) { continue }
+  $dst = Join-Path $stage $m[1]
+  Copy-Item $src $dst -Force
+  $assets += $dst
+}
 
 $already = (& $gh release view $Tag --repo "$Owner/$Repo" --json tagName 2>$null)
 if ($LASTEXITCODE -eq 0) {
