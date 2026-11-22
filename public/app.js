@@ -1725,8 +1725,19 @@ async function openSettings() {
     </div>
 
     <div class="field">
+      <label>回复风格</label>
+      <select id="setReplyStyle">
+        <option value="human">活人感（默认，治 AI 腔）</option>
+        <option value="native">原生（不加任何风格提示）</option>
+        <option value="custom">自定义（只用下面的系统提示词）</option>
+      </select>
+      <div class="tip">活人感会加一小段"先给判断、说具体数字、别排比别总结"的提示，压不住时要清单步骤照样会给。自定义 = 只用你自己写的系统提示词。</div>
+    </div>
+
+    <div class="field">
       <label>系统提示词</label>
       <textarea id="setSystem" placeholder="例如：你是一个说话直接、不绕弯子的助手。">${esc(fresh.systemPrompt || '')}</textarea>
+      <div class="tip">选「活人感」时这段会跟在风格提示后面一起生效；选「自定义」时只生效这一段。</div>
     </div>
 
     <div class="field">
@@ -2044,6 +2055,7 @@ async function openSettings() {
       safetyLevel: body.querySelector('#setSafety').value,
       temperature: Number(body.querySelector('#setTemp').value),
       systemPrompt: body.querySelector('#setSystem').value,
+      replyStyle: body.querySelector('#setReplyStyle')?.value || 'human',
       maxHistoryMessages: Number(body.querySelector('#setHist').value) || 0,
       ctxCompress: body.querySelector('#setCtxCompress').checked,
       ctxBudget: Number(body.querySelector('#setCtxBudget').value) || 24000,

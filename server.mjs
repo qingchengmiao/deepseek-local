@@ -248,6 +248,14 @@ async function draftMediaDigest(settings, apiKey, ctx, model) {
 }
 
 
+// 「活人感」风格提示词：治 AI 腔。故意写得短——禁则列一长串，模型会把回答也捆成清单。
+const HUMAN_STYLE_PROMPT = `你不是在写报告，是在跟人说话。第一句就给答案或判断，别重述问题、别铺垫。
+每句话尽量带具体的东西：数字、时间、名字、哪个文件、哪一步。说不准就说"这块我不确定，得查"，别硬凑。
+句子可以短，可以说一半，可以说错了当场改口。
+允许有偏向和情绪，可以说"我觉得""我倾向这个"。
+别用三段排比，别在每段末尾再总结一句刚说过的话，别用"值得注意的是""综上所述""由此可见"串场。
+短回答不用硬编号，也别给每个名词加粗。但用户明确要清单、步骤、表格、代码时照给，别为了口气把东西讲糊。`;
+
 const DEFAULT_SETTINGS = {
   apiKey: '',
   baseUrl: 'https://api.deepseek.com',
@@ -263,6 +271,7 @@ const DEFAULT_SETTINGS = {
   autoTitle: true,
   temperature: 1.0,
   systemPrompt: '',
+  replyStyle: 'human', // native=原生（不注入）| human=活人感 | custom=只用自己的 systemPrompt
   maxHistoryMessages: 0, // 0 = 不截断
   theme: 'auto',
   language: '中文',
@@ -557,6 +566,7 @@ async function saveSettings(patch) {
     else if (k === 'safetyLevel') next.safetyLevel = ['off', 'low', 'high'].includes(v) ? v : 'off';
     else if (k === 'ttsVoice') next.ttsVoice = v === 'tide' ? 'tide' : 'stella';
     else if (k === 'language') next.language = LANGUAGES.includes(v) ? v : '中文';
+    else if (k === 'replyStyle') next.replyStyle = ['native', 'human', 'custom'].includes(v) ? v : 'human';
     else if (typeof v === 'boolean') next[k] = v;
     else next[k] = v;
   }
@@ -3163,7 +3173,11 @@ async function buildMessages(conv, settings, { withTools = false } = {}) {
 
   // ---- 拼消息
   const out = [];
-  const systemPrompt = String(conv.systemPrompt || settings.systemPrompt || '').trim();
+  const ownPrompt = String(conv.systemPrompt || settings.systemPrompt || '').trim();
+  const style = String(settings.replyStyle || 'human');
+  // 「活人感」是给日常对话治 AI 腔用的：只留最有效的几条，长篇禁则反而会把回答捆住
+  const stylePrompt = style === 'human' ? HUMAN_STYLE_PROMPT : '';
+  const systemPrompt = [stylePrompt, ownPrompt].filter(Boolean).join('\n\n');
   if (systemPrompt) out.push({ role: 'system', content: systemPrompt });
 
   // 日历：把今天 / 接下来几天的日程带上（模型能主动说「你下午三点有会」）
