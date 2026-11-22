@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<title>DeepSeek Local</title>
+<link rel="icon" href="/assets/whale.png">
+<link rel="stylesheet" href="/vendor/katex.min.css">
+<link rel="stylesheet" href="/vendor/github-dark.min.css" id="hljsDark">
+<link rel="stylesheet" href="/vendor/github.min.css" id="hljsLight" disabled>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<div id="app" class="app">
+  <aside id="sidebar" class="sidebar">
+    <div class="side-head">
+      <button class="brand" id="brandBtn" title="新建对话">
+        <span class="brand-logo">
+          <svg viewBox="0 0 32 32" width="22" height="22"><rect width="32" height="32" rx="8" fill="#4d6bfe"/><path d="M10 21V11h3.2c3.2 0 5.3 1.9 5.3 5s-2.1 5-5.3 5H10zm2.6-2.2h.7c1.7 0 2.7-1 2.7-2.8s-1-2.8-2.7-2.8h-.7v5.6z" fill="#fff"/></svg>
+        </span>
+        <span class="brand-name">DeepSeek</span>
+      </button>
+      <button class="icon-btn side-collapse" id="collapseBtn" title="收起侧栏">‹</button>
+    </div>
+
+    <div class="side-actions">
+      <button class="new-chat" id="newChatBtn">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+        新建对话
+      </button>
+      <button class="icon-btn" id="searchToggle" title="搜索对话">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+      </button>
+    </div>
+
+    <div class="side-search hidden" id="searchBox">
+      <input id="searchInput" type="search" placeholder="搜索对话内容…" autocomplete="off">
+      <button class="icon-btn" id="searchClose" title="关闭搜索">×</button>
+    </div>
+
+    <div class="side-list" id="convList"></div>
+
+    <div class="side-foot">
+      <button class="foot-btn" id="clockBtn" title="日历与时钟">
+        <span id="clockText" class="clock-mini">--:--</span>
+        <span>日历</span>
+      </button>
+      <button class="foot-btn" id="qqNavBtn" title="QQ 通道">
+        <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 19c-1.8-.8-3-2.4-3-4.2 0-1 .3-1.9.8-2.7-.3-1.3-.2-2.6.3-3.6C7 6.6 9 5.4 12 5.4s5 1.2 5.9 3.1c.5 1 .6 2.3.3 3.6.5.8.8 1.7.8 2.7 0 1.8-1.2 3.4-3 4.2"/><circle cx="9.6" cy="11.6" r=".9" fill="currentColor" stroke="none"/><circle cx="14.4" cy="11.6" r=".9" fill="currentColor" stroke="none"/></svg>
+        <span>QQ</span>
+      </button>
+      <button class="foot-btn" id="pluginsBtn" title="通道与插件">
+        <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3h6v3a2 2 0 104 0h2v6h-3a2 2 0 100 4h3v5H9v-3a2 2 0 10-4 0H3V9h3a2 2 0 100-4H3V3h6z"/></svg>
+        <span>插件</span>
+      </button>
+      <button class="foot-btn" id="importNavBtn" title="导入对话（拖文件进来也行）">
+        <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V3"/><path d="M7 8l5-5 5 5"/><path d="M4 15v4a2 2 0 002 2h12a2 2 0 002-2v-4"/></svg>
+        <span>导入</span>
+      </button>
+      <button class="foot-btn" id="settingsBtn" title="设置">
+        <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.3 1.9l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.7 1.7 0 00-1.9-.3 1.7 1.7 0 00-1 1.5V21a2 2 0 11-4 0v-.1a1.7 1.7 0 00-1.1-1.5 1.7 1.7 0 00-1.9.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.7 1.7 0 00.3-1.9 1.7 1.7 0 00-1.5-1H3a2 2 0 110-4h.1A1.7 1.7 0 004.6 9a1.7 1.7 0 00-.3-1.9l-.1-.1a2 2 0 112.8-2.8l.1.1A1.7 1.7 0 009 4.6a1.7 1.7 0 001-1.5V3a2 2 0 114 0v.1a1.7 1.7 0 001 1.5 1.7 1.7 0 001.9-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.7 1.7 0 00-.3 1.9 1.7 1.7 0 001.5 1H21a2 2 0 110 4h-.1a1.7 1.7 0 00-1.5 1z"/></svg>
+        <span>设置</span>
+      </button>
+    </div>
+  </aside>
+
+  <div id="backdrop" class="backdrop"></div>
+
+  <main id="main" class="main">
+    <div id="pageView" class="page-view hidden">
+      <header class="topbar">
+        <button class="icon-btn only-mobile" id="pageBackBtn" title="回到对话">☰</button>
+        <div class="title-wrap">
+          <h1 id="pageTitle" class="conv-title">日历</h1>
+          <span id="pageSub" class="conv-meta"></span>
+        </div>
+        <div class="top-actions">
+          <button class="btn ghost" id="pageBack">回到对话</button>
+        </div>
+      </header>
+      <div id="pageBody" class="page-body"></div>
+    </div>
+
+    <div id="chatView" class="chat-view">
+    <header id="topbar" class="topbar">
+      <button class="icon-btn only-mobile" id="menuBtn" title="会话列表">☰</button>
+      <div class="title-wrap">
+        <h1 id="convTitle" class="conv-title">新对话</h1>
+        <span id="convMeta" class="conv-meta"></span>
+      </div>
+      <div class="top-actions">
+        <button class="ctx-badge hidden" id="ctxBadge" title="上下文与记忆">
+          <span class="ctx-bar"><i id="ctxFill"></i></span>
+          <span id="ctxLabel">上下文</span>
+        </button>
+        <button class="model-btn" id="modelBtn">
+          <span id="modelLabel">Flash</span>
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 9l6 6 6-6"/></svg>
+        </button>
+        <button class="icon-btn" id="moreBtn" title="更多">⋯</button>
+      </div>
+    </header>
+
+    <div id="scroller" class="scroller">
+      <div id="welcome" class="welcome hidden">
+        <div class="welcome-inner">
+          <div class="welcome-mark">
+            <svg viewBox="0 0 32 32" width="54" height="54"><rect width="32" height="32" rx="9" fill="#4d6bfe"/><path d="M10 21V11h3.2c3.2 0 5.3 1.9 5.3 5s-2.1 5-5.3 5H10zm2.6-2.2h.7c1.7 0 2.7-1 2.7-2.8s-1-2.8-2.7-2.8h-.7v5.6z" fill="#fff"/></svg>
+          </div>
+          <h2>今天想聊点什么？</h2>
+          <p class="welcome-sub">你自己官方的 API，全家桶能力都在这里：联网搜索、深度思考、读链接、传图片文档视频音频、语音输入、朗读回答。<br>记录只留在这台机器上。</p>
+          <div class="cards" id="welcomeCards">
+            <button class="card" data-prompt="用 Python 写一个批量重命名文件的脚本，要求能预览、支持正则、有干跑模式"><span class="card-icon">⌨</span><span>写一个批量重命名脚本</span></button>
+            <button class="card" data-prompt="用尽量通俗的话解释 Transformer 的注意力机制，配一个具体例子"><span class="card-icon">✎</span><span>通俗解释注意力机制</span></button>
+            <button class="card" data-prompt="把这句话翻成地道的英文，并说明你为什么这么译：我们先把最小可用的版本跑起来。"><span class="card-icon">⇄</span><span>翻译并讲讲理由</span></button>
+            <button class="card" data-prompt="一个水池有两个进水口和一个出水口，单独开甲 6 小时注满，乙 8 小时注满，出水口 12 小时放空。三口全开多久注满？"><span class="card-icon">∑</span><span>帮我算一道数学题</span></button>
+          </div>
+          <div class="welcome-warn hidden" id="welcomeWarn"></div>
+        </div>
+      </div>
+      <div id="messages" class="messages"></div>
+    </div>
+
+    <div id="composerWrap" class="composer-wrap">
+      <div id="composer" class="composer">
+        <div id="attachBar" class="attach-bar hidden"></div>
+        <textarea id="input" class="input" rows="1" placeholder="给 DeepSeek 发消息…" enterkeyhint="send"></textarea>
+        <div class="composer-bar">
+          <div class="composer-left">
+            <button class="chip" id="attachChip" title="上传图片、文档、视频或音频（视频/音频会自动转写）">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.4 11.1l-8.5 8.5a5.5 5.5 0 01-7.8-7.8l8.5-8.5a3.7 3.7 0 015.2 5.2l-8.5 8.5a1.8 1.8 0 01-2.6-2.6l7.9-7.9"/></svg>
+              附件
+            </button>
+            <button class="chip" id="webChip" title="联网搜索（可以在提问里直接贴链接让它读）">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.6 2.5 2.6 15 0 18M12 3c-2.6 2.5-2.6 15 0 18"/></svg>
+              联网
+            </button>
+            <button class="chip" id="thinkChip" title="深度思考">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 00-3.5 10.9V17h7v-3.1A6 6 0 0012 3z"/><path d="M9.5 20h5"/></svg>
+              深度思考
+            </button>
+            <button class="chip" id="hybridChip" title="混合模式：V4.1 Flash 先写大纲，V4 Pro 按大纲把正文写完整">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="4.6" r="2.1"/><circle cx="5.6" cy="19" r="2.1"/><circle cx="18.4" cy="19" r="2.1"/><path d="M12 6.7v3.1M12 9.8H5.6v7.1M12 9.8h6.4v7.1"/></svg>
+              混合
+            </button>
+            <select id="effortSel" class="chip-select" title="思考强度">
+              <option value="low">低</option>
+              <option value="high">高</option>
+              <option value="max">最高</option>
+            </select>
+            <button class="chip" id="micChip" title="语音输入（说话转文字）">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0014 0M12 18v3"/></svg>
+              <span class="mic-label">语音</span>
+            </button>
+            <span class="hint" id="composerHint"></span>
+          </div>
+          <div class="composer-right">
+            <span id="tokenHint" class="token-hint"></span>
+            <button id="sendBtn" class="send-btn" title="发送">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+            </button>
+          </div>
+        </div>
+      </div>
+      <div class="composer-note">内容由 AI 生成，请仔细甄别 · 记录只存在本机</div>
+    </div>
+    </div>
+  </main>
+</div>
+
+<div id="dropZone" class="drop-zone hidden" aria-hidden="true">
+  <div class="drop-card">
+    <div class="drop-art">
+      <svg viewBox="0 0 48 48" width="46" height="46" aria-hidden="true">
+        <path d="M7 13.5h11l3.4 4H41a2 2 0 0 1 2 2v16.5a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V15.5a2 2 0 0 1 2-2Z" fill="currentColor" opacity=".18"/>
+        <path d="M7 13.5h11l3.4 4H41a2 2 0 0 1 2 2v16.5a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V15.5a2 2 0 0 1 2-2Z" fill="none" stroke="currentColor" stroke-width="2.2"/>
+        <path d="M24 24v9m0-9-4 4m4-4 4 4" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>
+    <div class="drop-title" id="dropTitle">松手，加进这条消息</div>
+    <div class="drop-hint" id="dropHint">图片、PDF、Word、文本、音视频都行；对话包（zip）请去「导入」页整理</div>
+  </div>
+</div>
+
+<div id="modalRoot"></div>
+<div id="ctxMenu" class="ctx hidden"></div>
+<button id="selCopy" class="sel-copy hidden" type="button" title="复制选中的文字（不用按 Ctrl+C）">复制</button>
+<div id="toast" class="toast hidden"></div>
+<input type="file" id="fileInput" accept=".json,.zip,.md,.txt,.csv,.log,application/json,application/zip" multiple hidden>
+<input type="file" id="attachInput" accept="image/jpeg,image/png,image/gif,image/webp,.pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.txt,.md,.csv,.json,.epub,.mobi,.py,.js,.ts,.html,.css,.xml,.yaml,.yml,.log,video/mp4,video/quicktime,video/webm,video/x-matroska,video/x-msvideo,.mp4,.mov,.webm,.mkv,.avi,.m4v,audio/mpeg,audio/mp4,audio/wav,audio/ogg,audio/flac,audio/aac,audio/opus,.mp3,.m4a,.wav,.ogg,.flac,.aac,.opus" multiple hidden>
+<div id="audioHost" class="audio-host"></div>
+  <div id="mascot" class="mascot" title="点我一下">
+    <div id="mascotBubble" class="mascot-bubble hidden"></div>
+    <img src="/assets/dsniang.png" alt="吉祥物" draggable="false">
+  </div>
+<div id="hoverTip" class="hover-tip" role="tooltip" aria-hidden="true"></div>
+
+<script src="/vendor/highlight.min.js"></script>
+<script src="/vendor/katex.min.js"></script>
+<script src="/md.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

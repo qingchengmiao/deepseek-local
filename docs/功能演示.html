@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>DeepSeek Local · 功能演示</title>
+<style>
+  :root {
+    --ink: #1c1d21;
+    --ink-2: #4a4d57;
+    --ink-3: #7a7e8a;
+    --line: #e4e6ec;
+    --brand: #4d6bfe;
+    --brand-soft: #eef1ff;
+    --ok: #12936a;
+    --warn: #b4740b;
+  }
+  * { box-sizing: border-box; }
+  @page { size: A4; margin: 15mm 14mm; }
+  body {
+    margin: 0;
+    font-family: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+    color: var(--ink);
+    font-size: 11.2pt;
+    line-height: 1.72;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  h1 { font-size: 26pt; letter-spacing: .5px; margin: 0 0 6px; }
+  h2 {
+    font-size: 15pt; margin: 22px 0 8px; padding-bottom: 6px;
+    border-bottom: 1px solid var(--line);
+  }
+  h2 .n { color: var(--brand); margin-right: 8px; }
+  h3 { font-size: 12.4pt; margin: 14px 0 4px; }
+  p { margin: 7px 0; }
+  code {
+    font-family: "Cascadia Mono", Consolas, monospace;
+    font-size: 9.8pt; background: #f4f5f8; border: 1px solid #e9ebf0;
+    border-radius: 5px; padding: 0 4px;
+  }
+  .muted { color: var(--ink-3); font-size: 10pt; }
+  .cover { padding-top: 34mm; text-align: center; }
+  .cover .logo {
+    width: 84px; height: 84px; border-radius: 22px; margin: 0 auto 18px;
+    background: linear-gradient(160deg, #6d86ff, #3f5bf0);
+    color: #fff; font-size: 44px; font-weight: 700;
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 16px 34px -18px rgba(77,107,254,.8);
+  }
+  .cover .sub { font-size: 12.5pt; color: var(--ink-2); margin-top: 4px; }
+  .cover .rule { width: 64px; height: 3px; background: var(--brand); border-radius: 3px; margin: 20px auto; }
+  .cover .meta { color: var(--ink-3); font-size: 10pt; margin-top: 26px; line-height: 2; }
+  .lead {
+    background: var(--brand-soft); border-radius: 12px; padding: 12px 16px;
+    color: #2c3a72; margin: 14px 0;
+  }
+  figure { margin: 12px 0 16px; page-break-inside: avoid; }
+  figure img {
+    width: 100%; border: 1px solid var(--line); border-radius: 10px;
+    box-shadow: 0 10px 24px -18px rgba(20,22,40,.45);
+  }
+  figcaption { font-size: 9.6pt; color: var(--ink-3); margin-top: 6px; text-align: center; }
+  table { width: 100%; border-collapse: collapse; margin: 10px 0 4px; font-size: 10.2pt; }
+  th, td { border-bottom: 1px solid var(--line); padding: 7px 8px; text-align: left; vertical-align: top; }
+  th { background: #f7f8fb; font-weight: 600; color: var(--ink-2); }
+  ul, ol { margin: 8px 0 8px 22px; padding: 0; }
+  li { margin: 4px 0; }
+  .steps li { margin: 6px 0; }
+  .note {
+    border-left: 3px solid var(--warn); background: #fdf8ef; color: #6c4a05;
+    padding: 9px 12px; border-radius: 8px; margin: 10px 0; font-size: 10.3pt;
+  }
+  .file { display: flex; gap: 10px; align-items: baseline; font-size: 10.2pt; }
+  .file .k { min-width: 118px; color: var(--ink-3); }
+  .page-break { page-break-after: always; }
+</style>
+</head>
+<body>
+
+<section class="cover">
+  <div class="logo">D</div>
+  <h1>DeepSeek Local</h1>
+  <div class="sub">把官方 App 的体验，接到你自己的 API 上</div>
+  <div class="rule"></div>
+  <div class="sub" style="font-size:11pt;color:#7a7e8a">功能演示 · 演示沙盒 · 摘要模型自动拉取</div>
+  <div class="meta">
+    版本 1.0.1 ｜ Windows x64 桌面应用<br>
+    演示实例：<code>demo-data\</code> + 端口 <code>8899</code>（与日常数据完全隔离）<br>
+    文档生成于 2026-11-22
+  </div>
+</section>
+
+<div class="page-break"></div>
+
+<h2><span class="n">1</span>这一份演示是怎么来的</h2>
+
+<p>演示不是“摆拍”：它跑在一个<b>独立沙盒实例</b>里——自己的数据目录、自己的端口、没有任何真实对话，也不读你的 API Key。</p>
+
+<table>
+  <tr><th>项目</th><th>日常实例</th><th>演示沙盒</th></tr>
+  <tr><td>数据目录</td><td><code>data\</code></td><td><code>demo-data\</code></td></tr>
+  <tr><td>端口</td><td><code>8787</code></td><td><code>8899</code></td></tr>
+  <tr><td>对话</td><td>你自己的真实记录</td><td>三条示例会话（可重复生成）</td></tr>
+  <tr><td>API Key</td><td>按需配置</td><td>不配置（<code>hasKey=False</code>）</td></tr>
+  <tr><td>启动方式</td><td>桌面快捷方式 / <code>DeepSeek.exe</code></td><td>双击 <code>启动演示.cmd</code></td></tr>
+</table>
+
+<h3>怎么起、怎么停</h3>
+<ul class="steps">
+  <li>双击 <code>启动演示.cmd</code>：脚本先写一份 <code>demo-data\settings.json</code>（关掉“首启自动导入”，免得把真会话拷进演示），再起服务、等就绪、调 <code>tools\seed-demo.mjs</code> 灌演示数据，最后打开浏览器。</li>
+  <li>想用窗口版：<code>set DSAPP_DATA=…\demo-data</code>、<code>set PORT=8899</code>，再起 <code>dist\DeepSeek-win32-x64\DeepSeek.exe</code>。</li>
+  <li>停止：双击 <code>停止演示.cmd</code>（只结束 8899 上那个进程）。演示数据留着，下次接着用；想重来就删掉 <code>demo-data\</code>。</li>
+  <li>重复跑 <code>node tools\seed-demo.mjs http://127.0.0.1:8899</code> 不会翻倍：它会先删掉上次灌的「演示 · …」再灌。</li>
+</ul>
+
+<h3>灌进去的三条会话，各有用途</h3>
+<ul>
+  <li><b>演示 · 一次问十件事</b> —— 一屏十个问题 + 一段 Python 代码块，用来看多问题排版、代码高亮、消息操作行。</li>
+  <li><b>演示 · 长对话如何不丢上下文</b> —— 六段重复背景，用来演示分档压缩与“原文归档还能翻回来”。</li>
+  <li><b>演示 · 拿来就能用的几件小事</b> —— 短问答，用来演示自动标题、预览、搜索结果。</li>
+</ul>
+
+<figure>
+  <img src="../data/shots/82-演示-对话页.png" alt="演示对话页">
+  <figcaption>图 1 沙盒里的演示对话：多问题列表、代码块「复制」、消息操作行、右下角吉祥物</figcaption>
+</figure>
+
+<div class="page-break"></div>
+
+<h2><span class="n">2</span>导入对话：先辨认，再落库</h2>
+
+<p>底栏第五个按钮「导入」是一个独立整页。文件拖进来先<b>辨认</b>，告诉你它属于哪一类、准备生成几个会话，再让你决定导不导——不是闷头灌数据。</p>
+
+<table>
+  <tr><th>你拖进来的</th><th>它怎么处理</th></tr>
+  <tr><td>DeepSeek 官方导出包（含 <code>chat_session_index.json</code>）</td><td>按官方结构还原每个会话（思考过程、引用、图片），图片落到 <code>data/media/imported-*</code></td></tr>
+  <tr><td>任意含会话数组的 JSON 整包</td><td>识别 <code>conversations</code> / <code>messages</code> 字段，逐个导入</td></tr>
+  <tr><td>普通资料压缩包</td><td>按顶层目录分成 2–6 组，每组生成一个「资料包 · 目录名」会话，正文是文件清单 + 内容</td></tr>
+  <tr><td>单个 <code>.md</code> / <code>.txt</code> / <code>.json</code></td><td>当成一份材料，生成一个会话</td></tr>
+</table>
+
+<p class="muted">限制：单包 ≤ 200 MB；文本类最多 60 个文件；单文件取前 6000 字；单会话累计 4 万字；图片/文档/二进制不会硬塞给模型。压缩包里一个文本都没有时，会直接说清原因（例如“这不是 zip（找不到 EOCD）”），不是静默失败。</p>
+
+<figure>
+  <img src="../data/shots/83-演示-导入页.png" alt="导入页">
+  <figcaption>图 2 导入页：左侧拖放区 + 「它能认出什么」四类说明 + 限制条款</figcaption>
+</figure>
+
+<div class="note">
+  <b>和“拖进对话页”的区别：</b>对话页拖文件 = 给这条消息<b>加附件</b>（图片 / PDF / Word / 文本 / 音视频）；只有导入页拖文件才是<b>整理成对话</b>。对话页拖进来一个 <code>.zip</code>，它会提示“像对话包，交给「导入」页整理”并跳过去，不会误当附件。
+</div>
+
+<div class="page-break"></div>
+
+<h2><span class="n">3</span>摘要模型：本机没有就自动从国内镜像拉一个</h2>
+
+<p>长对话的压缩摘要优先交给本机 ollama 的小模型写——不走网络、不花 API 钱。问题是新机器上往往没装模型。现在这条路上加了自愈：</p>
+
+<ol class="steps">
+  <li><b>触发</b>：要写摘要时发现本机 ollama 在线但<b>没有可用对话模型</b>，后台自动开始拉；也可以点设置里的「现在拉一个」手动触发。</li>
+  <li><b>先官方源</b>：<code>ollama pull qwen2.5:1.5b-instruct</code>（不行退 <code>qwen2.5:0.5b-instruct</code>）。</li>
+  <li><b>再国内镜像</b>：官方源拉不动，就依次换 <b>魔搭 ModelScope</b>（<code>modelscope.cn/models/&lt;repo&gt;/resolve/master/&lt;file&gt;</code>）与 <b>hf-mirror.com</b> 下 GGUF，存到 <code>data/models/</code>（先写 <code>.part</code> 再改名，按 2 MB 一步记进度）。</li>
+  <li><b>装进 ollama</b>：生成 Modelfile（<code>num_ctx 8192</code>、<code>temperature 0.3</code>、Qwen ChatML 模板）后 <code>ollama create</code>，之后当普通模型用。</li>
+  <li><b>只用一次</b>：同一个模型装过就复用；进度、来源、最近 20 行日志都能在 <code>GET /api/context/model-pull</code> 与设置页看到。</li>
+</ol>
+
+<figure>
+  <img src="../data/shots/84-演示-摘要模型自动拉取.png" alt="设置页：摘要模型自动拉取">
+  <figcaption>图 3 设置页「缺模型时自动拉一个（国内镜像优先）」：开关 + 「现在拉一个」+ 拉取状态与来源</figcaption>
+</figure>
+
+<h3>可调、可验</h3>
+<ul>
+  <li>环境变量 <code>DSAPP_OLLAMA_CLI</code> 指定 ollama 可执行文件；<code>DSAPP_PULL_MIRRORS</code> 换镜像（自测就是这么注入假镜像的）。</li>
+  <li>自测脚本 <code>node tools\model-pull-test.mjs</code>：起假 ollama + 假镜像 + 假 CLI，验证「官方源失败 → 镜像下载 → <code>ollama create</code> → 可用」整条链路，<b>13 项全过</b>。</li>
+  <li>全失败时的文案是 <code>官方源和国内镜像都没拉成（检查网络或手动 ollama pull）</code>；摘要照旧退回 API，不阻塞对话。</li>
+</ul>
+
+<div class="page-break"></div>
+
+<h2><span class="n">4</span>自测与限制（写在文档里的那部分）</h2>
+
+<table>
+  <tr><th>检查项</th><th>结果</th></tr>
+  <tr><td><code>tools\model-pull-test.mjs</code></td><td>13 通过 / 0 失败（假 ollama + 假镜像 + 假 CLI）</td></tr>
+  <tr><td><code>tools\import-preview-test.mjs</code></td><td>27 通过 / 0 失败（zip / JSON 整包 / 文本 / 认不出来）</td></tr>
+  <tr><td><code>tools\import-page-test.mjs</code></td><td>15 通过 / 0 失败（认一认、导一次、会话 +2）</td></tr>
+  <tr><td><code>tools\chat-drop-test.mjs</code></td><td>11 通过 / 0 失败（对话页拖入=附件、导入页拖入=导入）</td></tr>
+  <tr><td><code>tools\lint-frontend.mjs</code></td><td>全部通过（28 个 /api 接口都能在 server.mjs 找到）</td></tr>
+</table>
+
+<h3>诚实的边界</h3>
+<ul>
+  <li>镜像那两条 URL 是<b>公开的 HF / 魔搭路径</b>，能用与否取决于当天的网络与仓库结构；拉不到会明确报错，不会假装成功。</li>
+  <li>演示沙盒里没有 API Key，所以演示页只展示界面与本地能力，不发起真实联网/推理请求。</li>
+  <li>QQ 真扫码登录仍未端到端验证（需要你本机启动 NapCat 扫码）。</li>
+</ul>
+
+<h3>这份演示涉及的文件</h3>
+<div class="file"><span class="k">演示入口</span><code>启动演示.cmd</code> / <code>停止演示.cmd</code></div>
+<div class="file"><span class="k">演示数据</span><code>tools\seed-demo.mjs</code> → <code>POST /api/import</code></div>
+<div class="file"><span class="k">截图脚本</span><code>tools\shot-demo.mjs</code></div>
+<div class="file"><span class="k">拉模型</span><code>server.mjs</code>（<code>PULL_TARGETS</code>/<code>PULL_MIRRORS</code>/<code>pullSummaryModel</code>）、<code>context.mjs</code>（<code>ctxAutoPull</code>）、<code>public\app.js</code>（设置页状态）</div>
+<div class="file"><span class="k">自测</span><code>tools\model-pull-test.mjs</code></div>
+
+<p class="muted" style="margin-top:22px;text-align:center">DeepSeek Local 1.0.1 · 本地优先的 DeepSeek 客户端 · 2026-11-22</p>
+
+</body>
+</html>

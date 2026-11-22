@@ -1,0 +1,498 @@
+# DeepSeek 对话（本地版）
+
+把 DeepSeek 手机 App 的用法搬到你自己的电脑上，后端接的是 **DeepSeek 官方 API**（你自己的 Key），还能把 App 里导出的历史对话直接导进来接着聊。
+
+服务端零依赖（只用 Node 自带模块），界面是原生 HTML/CSS/JS；桌面壳用 Electron 打包成 `DeepSeek.exe`，数据全在本机。
+
+---
+
+## 下载与安装（发布版 v1.0.1）
+
+不想自己编译的话，直接用安装包：
+
+| 文件 | 说明 |
+| --- | --- |
+| `DeepSeekLocal-Setup-1.0.1.exe` | 安装包（约 105 MB，Windows 10/11 x64，中文向导，按当前用户装、不需要管理员） |
+| `DeepSeek-Local-1.0.1-source.zip` | 源码包（不含 `data/`、`dist/`、`node_modules/`，可自行构建） |
+| `DeepSeek-Local-功能介绍.pdf` / `DeepSeek-Local-功能演示.pdf` | 图文说明（功能介绍、演示沙盒、摘要模型自动拉取） |
+
+安装：双击 `DeepSeekLocal-Setup-1.0.1.exe` → 一路「下一步」。默认装到 `%LOCALAPPDATA%\Programs\DeepSeekLocal`，桌面和开始菜单生成 **DeepSeek** 快捷方式，指向原生启动器 `DeepSeekLauncher.exe`（托盘、单实例、自动拉起本地服务、内存回收）。
+
+- 用户数据独立放在 `%LOCALAPPDATA%\DeepSeekLocal\data`（`--data-dir` 可改），升级/重装**不会覆盖**你的对话；卸载也不会删数据。
+- 第一次打开要做两件事：左下角「设置」填 DeepSeek API Key（只存本机 `data/settings.json`）；需要联网/深度思考就在输入框下面的胶囊里打开。
+- 校验值见仓库 Releases 页面或 `RELEASE_NOTES.md`（SHA256）。
+
+自己构建：`npm i` 装 Electron → 见下面「打包成安装包」一节（Electron packager + Inno Setup）。
+
+---
+
+## 怎么跑
+
+### 装好就直接用（双击）
+
+桌面和开始菜单各有一个 **DeepSeek** 快捷方式，双击就开——它指向打包好的 `dist\DeepSeek-win32-x64\DeepSeek.exe`：
+
+- 窗口是自己的（Electron），不是浏览器标签页：有任务栏图标、单实例（再双击只把已有窗口提到前面）
+- 本地服务跑在应用进程里，不用另外开终端；关窗口 = 服务一起关
+- 数据在 `dist\DeepSeek-win32-x64\data`（这里做成了指向仓库 `data/` 的 junction，开发版和打包版共用同一份会话）
+
+想重新建快捷方式：`powershell -ExecutionPolicy Bypass -File tools\install-shortcut.ps1`
+（脚本会自动优先用打包好的 exe；没打包过就退回 `启动应用.vbs` 那套「node 服务 + Edge 独立窗口」。）
+
+**这台机器上有一个坑：exe 必须带 `--no-sandbox` 才起得来。** 不带的话 Chromium 初始化沙箱时进程会**静默退出**（没窗口、没报错，表现就是「双击没反应」）。所以桌面/开始菜单快捷方式的参数里、`启动应用.vbs` 里都写了 `--no-sandbox`；应用只加载 `127.0.0.1` 的本地页面、外部导航一律拦掉，代价可控。想恢复沙箱：把快捷方式参数去掉，并在启动前设 `DSAPP_SANDBOX=1`。
+
+启动过程有追踪日志：`data/app-start.log`（每次启动追加 `boot / singleInstanceLock / ready / findRunning / serverReady / windowCreated / windowShown`）。**再遇到双击没反应，先看这个文件**——停在哪一行就说明卡在哪一步；如果连 `boot` 都没有，那就是 exe 根本没进到 JS（多半是参数或沙箱问题）。
+
+### 演示沙盒（不碰你自己的对话）
+
+想拿一份干净数据试功能、截图、录屏，双击 **`启动演示.cmd`**：
+
+- 它是**另一个实例**：数据目录 `demo-data\`、端口 **8899**，跟正常那套（`data\` + 8787）完全隔开；
+- 首次启动会关掉「自动导入」（免得把工作区里你导出的真会话拷进演示数据），并调 `tools\seed-demo.mjs` 灌三条演示会话：**一次问十件事**（多问题 + 代码块）、**长对话如何不丢上下文**（6 段重复背景，用来看分档压缩）、**拿来就能用的几件小事**；
+- 只起服务、在浏览器里打开 `http://127.0.0.1:8899`；想连 Electron 窗口就用 `set DSAPP_DATA=…\demo-data` + `set PORT=8899` 再起 `dist\DeepSeek-win32-x64\DeepSeek.exe`；
+- 停掉用 **`停止演示.cmd`**（只杀 8899 上那个进程）。演示数据留在 `demo-data\` 里，下次接着用；想重来就把它删掉。
+
+重复跑 `node tools\seed-demo.mjs http://127.0.0.1:8899` 不会翻倍——它会先把上次灌的「演示 · …」会话删掉再灌。
+
+### 开发时改代码
+
+```
+npm start          # 用 Electron 起整个应用（改前端刷新即可生效）
+npm run serve      # 只起服务，浏览器开 http://127.0.0.1:8787
+npm run web        # 起服务并自动开系统浏览器
+npm run desktop    # 起服务 + Edge/Chrome 独立窗口（旧的桌面方式，没装 Electron 时用）
+```
+
+### 重新打包 exe
+
+```
+$env:ELECTRON_MIRROR = 'https://npmmirror.com/mirrors/electron/'
+node node_modules\@electron\packager\bin\electron-packager.mjs . DeepSeek `
+  --platform=win32 --arch=x64 --icon=assets/app.ico --out=dist --overwrite `
+  --app-version=1.0.1 --electron-version=45.4.1 --prune=true --no-asar `
+  --ignore="^/dist" --ignore="^/data" --ignore="^/node_modules"
+```
+
+打完之后要把数据目录接回去（否则新 exe 会看成空数据）：
+
+```
+New-Item -ItemType Junction -Path dist\DeepSeek-win32-x64\data -Target (Resolve-Path .\data)
+```
+
+第一次进来先点左下角 **设置**，填 API Key（在 https://platform.deepseek.com/api_keys 建），点「测试连接」看到绿色再用。Key 只存在本机数据目录的 `settings.json`，接口回给前端的永远是掩码。
+
+默认地址 `http://127.0.0.1:8787`，端口被占用会自动往后找，实际地址写在数据目录的 `server.json` 里。
+
+联网搜索、看图、读文档、语音输入、朗读用的都是同一把 Key，但**联网/看图/文档要求模型是 `deepseek-flash`**（`deepseek-v4-pro` 是纯文本，选它时这些按钮会灰掉）。
+
+视频/音频解析需要本机有 **ffmpeg**（`ffmpeg.exe` 与 `ffprobe.exe`）。服务端会按这个顺序找：设置里的 `ffmpegPath` → 环境变量 `FFMPEG_PATH`/`FFPROBE_PATH` → `D:\ffmpeg-9.0-full_build\bin\` → `/usr/bin` → PATH。找不到时上传视频会直接报「找不到 ffmpeg」，不会静默失败。
+
+---
+
+## 跟 App 对得上的地方
+
+用的是 DeepSeek 2026-11 发布的「全家桶应用 API」，所以 App 上那些能力这里基本都能对上：
+
+| App 里有的 | 这里 |
+| --- | --- |
+| 会话列表、置顶、重命名、删除 | 有 |
+| 全文搜索（点结果直接跳到那条消息） | 有 |
+| 联网搜索 / 深度思考搜索 | 有（输入框上那个「联网」开关；思考开着就是深度思考搜索） |
+| 阅读链接（把消息里的网址读进上下文） | 有（贴 URL 自动读；API 读不到时本机抓 HTML / 内嵌 Chromium 再读一次） |
+| 深度思考过程，可折叠 | 有，显示「已深度思考（用时 N 秒）」，可调强度 低/高/最高 |
+| 联网过程卡片 + 正文引用角标 + 参考来源 | 有（搜了哪些词、开了哪些页面、来源标题与站点都能点开） |
+| 上传图片（看图提问） | 有（图片按钮或直接粘贴） |
+| 上传文档（PDF/Word/Excel/PPT/EPUB 等） | 有（走 Files API 解析，TXT/MD/CSV/JSON/代码类不计费） |
+| 上传视频 / 音频 | 有（本机 ffmpeg 抽音轨→切段→语音识别，视频再抽关键帧一起发给模型） |
+| 语音输入 | 有（录完自动转文字填进输入框） |
+| 朗读回答 | 有（每条回答上的喇叭，两种音色可选） |
+| 自动生成会话标题 | 有（每轮由模型起名，可关） |
+| 内容安全审核 | 有（关/低/高，对外提供服务时务必开） |
+| 继续生成（接着说完） | 有（回答末尾的「继续」） |
+| Markdown、公式、代码高亮 | 有（KaTeX + highlight.js，离线打包） |
+| 复制、编辑重发、重新生成、删除消息 | 有 |
+| 从某条消息分叉出新会话 | 有 |
+| 模型切换 | 有（deepseek-flash 支持图片与联网；deepseek-v4-pro 纯文本、推理更强） |
+| 深色 / 浅色主题 | 有（还能跟随系统） |
+| 导入 App 导出的对话记录 | 有，拖文件或用「导入」 |
+| 导出会话为 Markdown / JSON | 有 |
+| 手机端布局 | 窗口窄于 860px 自动变抽屉式 |
+| 长对话自动压缩 + 记忆摘要 | 有（顶部徽标看占用，`⋯`→「上下文与记忆」看摘要与召回） |
+| 分档压缩：占用每涨 33% 压一档，每次记概要 + 关键词 | 有（面板里列「压缩记录」，每段可「展开」原文） |
+| 占用过 50% 后按时间权重概括成长期记忆、老段遗忘 | 有（超半衰期的分段只留关键词，原文仍在归档里） |
+| 关键词提示 + 逐步恢复（展开第 N 条） | 有（低相关度只给索引卡，说一句「展开第 2 条」就把原文取回来） |
+| 旧对话按时间降权、按需召回 | 有（本地索引 + 时间衰减，见下面那节） |
+| 自动路由：对话走 V4 Pro、逻辑思考走 V4.1 Flash、混合两遍（也可用二分树开关强制） | 有（模型菜单选「自动」，见下面那节） |
+
+**App 有但 API 没有的**：账号与云同步、推送通知、离线缓存、App 内购买。这里一律不做假开关——界面上能点的都是真接 API 的。
+
+**另外这里比 App 多的**：历史对话全在你本机（`data/conversations/`），可以导出成 Markdown，也可以直接用编辑器打开看。
+
+
+---
+
+## 上下文、记忆与检索（长对话怎么不跑偏）
+
+模型只有有限的上下文窗口；这里不是把整段历史一股脑塞进去，而是分六层：
+
+1. **热区**：从最后一条往前累计到「预算 × 热区比例」（默认 2.4 万 token 的 60%），这段原样发给模型。
+2. **分档概要**：占用每涨 33%（`ctxStepRatio`）压一档，把新露出来的老消息压成一段结构化摘要（事实 / 决定与理由 / 偏好与要求 / 未完成），并记一条「压缩记录」：第几档、哪几条、压的时候占用多少、多少 token、用了哪个引擎、关键词、一句话提要、原文文件名。同一档不会重复压。
+3. **长期记忆（时间加权 + 遗忘）**：占用（按历史总量算，不受压缩影响）过 50%（`ctxForgetRatio`）时，把所有分段概要合并成一段「长期记忆」，并按时间权重决定哪几段该忘——超过半衰期的分段标记为已遗忘，只留关键词，正文从记忆里丢掉（原文还在归档里，随时能展开回来）。
+4. **原文归档**：压缩之前，被压掉的那一段原文先另存成 `data/archive/<会话id>/<起始>-<结束>.json`（`{convId,title,from,to,savedAt,engine,messages:[…]}`），同时写 `index.json`（分段 + 可选稠密向量）。摘要丢掉的细节还能翻原文，归档片段也能被召回；清空记忆不会删归档文件。
+5. **检索 + 渐进激活**：老消息另建本地词面索引，按当前提问做 BM25 召回。命中分两级——相关度 ≥ `ctxActivateScore`（默认 0.2）的**直接给原文片段**；低于阈值的只给一张「记忆索引卡」（`#k 第 a–b 条 · 相关度 · 关键词 · 一句话提要`），并在系统提示里告诉模型「原文没展开，需要细节就让用户回一句『展开第 k 条』」。用户在对话里说「展开第 2 条 / 恢复记忆 2」时，系统把那段原文（优先历史、没有就翻归档 JSON）注进上下文；面板里每条压缩记录也有「展开」按钮。
+6. **时间衰减**：召回排序乘一个半衰期权重（默认 30 天减半），老内容不会挤掉新内容；热区里超过半衰期的消息正文也会被压短，末尾留一行「较早的内容已按时间降权压缩」。
+
+**要说实话的地方**：
+
+- DeepSeek 没有 embeddings 接口（`/v1/embeddings` 是 404），所以历史索引是本机算的**词面**索引（BM25 + 词表维度），**认词，不认近义词**——查「心率」找得到「心率八次」，查「脉搏」不一定。
+- 语义那部分靠本机 ollama：`ctxEmbedModel: auto` 时会给**归档区间**算一条 `nomic-embed-text` 向量（768 维），检索时和历史 BM25 混分（`max(bm25, bm25*0.6 + 余弦*0.4)`）。归档按区间存一条向量、不按段存，否则几千段 × 768 维会把 JSON 撑爆。没有 ollama 就自动退化成纯 BM25。
+- 归档检索目前和历史检索覆盖同一段旧消息（历史索引也索引到了），所以命中通常会由历史那份先出；归档真正的价值是**原文备份**（摘要丢细节时能翻）和以后真裁剪历史时的兜底。
+- 关键词是从消息里按词频 + 跨消息出现次数抽的，纯填充文本抽出来的会是「备份、存储、导出」这类词，不一定是人觉得重要的那个；索引卡只是线索，模型真要细节仍然靠「展开第 k 条」。
+
+顶部那个徽标显示当前占用（超过预算会变橙色写「超预算」）。点开「上下文与记忆」可以：看记忆摘要、看压缩到第几档/概括到第几级、看摘要引擎与归档占用、看每一条压缩记录（含已遗忘的）并「展开」原文、拿任意查询试召回（会显示相关度、时间权重、是否来自归档、是直给还是索引卡）、手动触发一次压缩、清空记忆。设置里能调预算、热区比例、半衰期、召回条数、相关度阈值、分档步进（默认 33%）、遗忘阈值（默认 50%）、渐进激活开关与激活阈值、摘要用哪个模型（自动/只用本机/只用 API）、本机模型与向量模型、要不要归档原文，还有一个「测一下」直接问本机模型能不能写摘要。
+
+关掉压缩会退化成「只用热区 + 检索」，关掉检索就只用热区 + 记忆。
+
+### 摘要模型没了？会自动从国内镜像拉一个
+
+压缩摘要优先交给本机 ollama 的小模型写（不走网络、不花 API 钱）。以前本机没装模型就只能退回 API，现在加了一条自愈路径：
+
+- 触发：设置里「缺模型时自动拉一个（国内镜像优先）」（`ctxAutoPull`，默认开）。任何一次要写摘要时发现本机 ollama 在线但**没有可用对话模型**，就后台开始拉；面板上「现在拉一个」也能手动触发（`POST /api/context/model-pull`）。
+- 顺序：先按目标试官方源 `ollama pull`（`qwen2.5:1.5b-instruct`，不行退 `qwen2.5:0.5b-instruct`）；官方源拉不动，就依次换**国内镜像**：
+  - 魔搭 ModelScope：`https://modelscope.cn/models/<repo>/resolve/master/<file>`
+  - HF 镜像 hf-mirror.com：`https://hf-mirror.com/<repo>/resolve/main/<file>`
+  下到 `data/models/*.gguf`（先写 `.part` 再改名，按 2 MB 一步记进度），再生成 Modelfile（`num_ctx 8192`、`temperature 0.3`、Qwen ChatML 模板）用 `ollama create` 装成一个正常 ollama 模型。
+- 只用一次：同一个模型装过就复用，不重复下载；`GET /api/context/model-pull` 能看进度、来源、日志（最近 20 行），设置页那块状态会自己轮询刷新。
+- 可调：环境变量 `DSAPP_OLLAMA_CLI`（指定 ollama 可执行文件）、`DSAPP_PULL_MIRRORS`（JSON 数组换镜像，测试就是这么注入假镜像的）。
+- 兜底：官方源和国内镜像都失败就写清原因（`官方源和国内镜像都没拉成（检查网络或手动 ollama pull）`），摘要照旧退回 API，不阻塞对话。
+
+### 每个会话一套上下文参数（预算最多顶到 1M）
+
+全局设置里那份是**默认值**；单个会话可以有自己的：
+
+- 面板「上下文与记忆」中部有「本会话上下文参数」：预算（跟随全局 / 24k / 64k / 128k / 256k / 512k / **1M**）、热区比例、召回条数、半衰期，以及自动压缩、检索旧片段两个开关。
+- 点「保存到本会话」写进 `conv.ctx`（只存改过的键），之后这个会话组装上下文、压缩、召回都用这份；点「恢复跟随全局」删掉覆盖。
+- 面板顶部那行会写「（这个会话单独设了）」还是「（现在跟随全局）」，`GET /api/conversations/:id/context` 里也有 `ctx: { followGlobal, overrides, budgetMax }`。
+- **1M 是 V4.1 Flash 的窗口上限**（`CTX_BUDGET_MAX`），原来全局上限卡在 40 万，现在放开了。注意：窗口 1M ≠ 应该用 1M——预算越大注意力越散，默认仍是 2.4 万。
+
+### 整合记忆（手动把分段记忆压成一段长期）
+
+面板底部「整合记忆」调 `POST /api/conversations/:id/context/consolidate`：把当前所有分段概要按时间权重合成一段长期记忆，超过半衰期的段只留关键词（原文仍在归档里，能展开回来），返回 `{before, after, forgotten, segments, engine}`，面板会 toast 提示省了多少 token。
+
+- 还没压过档的会话会回 400 `NO_RECORDS`（「先压一次再整合」）；只有一段记忆时会回 `skipped: true`，不算失败。
+- 它和「占用过 50% 自动做的那次概括」是同一个函数（`consolidateMemory`），手动按钮只是不必等占用涨上去。
+
+装 ollama 之后建议拉个小模型（本机已有 qwen3.5:4b 也能用）：
+
+```powershell
+ollama pull qwen2.5:1.5b-instruct   # 更快，摘要这种活够用
+ollama pull nomic-embed-text        # 想要语义混排在设置里把向量模型设成 auto
+```
+
+---
+
+## 读链接：先靠 API，读不到再用本机
+
+消息里有网址时，首选仍然是 API 那边的 `deepseek_read_url` 工具——它是服务端在读，正文干净、能带引用，模型自己决定读哪一段。
+
+但有些站它读不到（反爬、必须登录、纯 JS 渲染），所以本机补两级兜底（`fetchlink.mjs`）：
+
+1. **直接抓 HTML**：带浏览器 UA 请求，处理 charset（含 gb18030），优先 `<article>` / `<main>`，剥掉脚本、样式、导航、页脚，实体还原，最后得到纯文本。零依赖，通常几百毫秒。
+2. **内嵌 Chromium**：HTTP 只拿到一点点（纯 JS 站点）或者干脆失败时，用应用自带的 Chromium 开一个隐藏窗口把页面真的渲染一遍，等脚本跑完再取 `innerText`。只有桌面版有这一级；在浏览器里打开、或用 `node server.mjs` 跑服务时自动跳过，不会报错。
+
+读到的东西不额外花钱：正文截前 2500 字，作为一段 system 块插在你这条消息之前，明确标了「本机预读」「HTTP 抓取 / 内嵌内核」和原链接；模型仍然可以再调一次 API 工具去读更完整或更权威的版本。读不到就不假装读到——失败原因会以 warning 抛出来，并照旧交给 API 工具。
+
+设置里三档：**自动**（API 工具 + 本机预读，默认）、**只用 API 工具**、**只用本机抓**（不发工具声明，适合模型不支持 tools 或想省工具费）。另有「本机预读网页」开关，只关掉预读时仍然保留 API 工具。
+
+---
+
+## 自动路由：一条消息该由谁写
+
+模型菜单里选「自动（按内容路由）」后，每条消息发出去之前先判一次意图，再决定用哪个模型、要不要思考：
+
+| 判定 | 走谁 | 怎么判 |
+|---|---|---|
+| 对话 | V4 Pro | 默认档：闲聊、问事、接着聊 |
+| 逻辑思考 | V4.1 Flash（带思考） | 命中代码 / 报错 / 算法 / 推导 / 计算 / 为什么 / 排查 / 对比 这类词；或者你手动打开了深度思考 |
+| 混合 | Flash → Pro（两次） | 要成篇的东西（周报、方案、报告、提纲、文案、剧本…）且超过 12 个字 |
+| 看附件 | V4.1 Flash | 这条消息带图片 / 文档 / 音视频——Pro 是纯文本，看不了 |
+
+「混合」是两遍：先让 V4.1 Flash 写一份 3–8 条的大纲（非流式、不开思考、≤800 token），把大纲作为 system 块插在这条消息之前，再让 V4 Pro 按大纲把正文写完整。第二遍的提示里明确要求「展开每一节、不要提大纲和草稿」。大纲这一遍失败不会让整条消息失败——降级成直接让 Pro 写，并用 warning 说清楚。
+
+回答上方有一枚小标签写着这次的判定（`自动路由 · 混合 · V4 Pro · Flash 大纲 236 字`），关掉页面也在——路由结果存在消息的 `route` 字段里。
+
+设置里能改每一档具体用哪个模型（对话 / 逻辑思考 / 混合出大纲 / 混合写正文四项），也能整体关掉「自动路由」。手动在模型菜单里选了具体模型的会话不受影响——只有选「自动」时才路由。
+
+调试用：`POST /api/route/test {text, thinking, attachments, mode}` 只跑判断、不发请求，返回 `{kind, model, reason, draftModel}`。
+
+### 混合模式开关（输入框里的二分树按钮）
+
+自动路由里那档「混合」是靠关键词猜的（周报、方案、提纲…）。不想让它猜，就点输入框里的**二分树按钮**：从下一条消息起，不管内容是什么，一律走两遍——
+
+1. V4.1 Flash 先写一份大纲（非流式、不开思考、≤800 token，不给你看）；
+2. V4 Pro 按大纲把正文写完整（流式，标着「混合模式 · V4 Pro · Flash 大纲 N 字」）。
+
+几个边界：
+
+- 它**比自动路由更硬**：开关开着就接管，不受「自动路由」总开关影响，也不过 `HYBRID_HINTS`；关掉后立刻回到原来的判定。
+- 开着混合时「深度思考」会变灰——第一遍不带思考，那是刻意的。
+- **带附件的消息开不了**：Pro 是纯文本，看不了图；这时会提示先移除附件。真带着附件发（比如从别处切过来），服务端降级成「看附件」那一档，不会报错。
+- 手动在模型菜单里选了具体模型也照样生效——开关是你按下的，优先级高于「模型菜单」。
+- 服务端开关是 `hybridMode`（默认 `false`），设置页「自动路由」下面也有同一枚复选框。请求体用 `hybrid: true` 单条强制，`POST /api/route/test {hybrid:true}` 可以只验判断。
+
+### 音视频两段式（带视频/音频的那个档）
+
+「看附件」原来是一遍过：把转写和抽帧一起塞给 V4.1 Flash，让它又看又写。现在音视频单独一档，也是两遍——
+
+1. **V4.1 Flash 先扒要点**（非流式、不开思考、≤900 token）：看转写文字 + 那 6 帧画面，输出「整体是什么 / 按时间的关键点 / 硬信息（数字、名字、地点、结论、待办）」，只写清单不成段，中文 500 字以内。
+2. **V4 Pro 按要点写正文**（流式，标着「音视频 · V4 Pro · Flash 要点 N 字」）。第二遍会把图片块全部剥掉——Pro 是纯文本模型，留着 `image_url` 会 400。
+
+几个边界：
+
+- 只对**视频/音频**附件生效（`kind === 'video' | 'audio'`）；图片和文档仍走原来的一遍「看附件」。
+- 设置页「音视频两段式解析」是开关（`mediaTwoStage`，默认开）。关掉就回到一遍过。省的那点钱和「先扒要点再成篇」的质量，你自己权衡。
+- 第一遍失败不影响回话：降级成直接让 Pro 写，用 warning 说「要点没写出来」。
+- 混合模式开着又带音视频时，走的就是这一档（不是 vision），`reason` 写「你打开了混合模式：V4.1 Flash 先扒要点…」。
+- 调试：`POST /api/route/test {text, attachments:[{kind:'video'}], hybrid:true}` 会返回 `kind: 'media'` + `draftModel`。
+
+---
+
+## 四个整页入口：对话 / 日历·时钟 / QQ / 插件 / 设置
+
+侧栏现在管导航：上面对话列表，底下四格是「日历 · QQ · 插件 · 设置」。点哪格，右边主区就换成那一页，左上角「回到对话」或按 Esc 回去。对话本身也是一个视图，不会因为切页丢掉。
+
+- **日历 · 时钟**（一格，一页两面）：左边月网格和当天安排，右边大钟 + 今天还剩 + 接下来 7 天。那一格平时显示当前时间。
+- **QQ**（独立一页）：顶部连接状态、扫码登录区、最近收发，下面是设置与发送框。
+- **插件**（独立一页）：本应用自己的通道一览——QQ 通道、日历、读链接、自动路由、上下文压缩检索、本机小模型。每行显示状态（开/关、在线/没起、模型名），右边就地开关或下拉，还能「去 XX 页」跳过去。这里只管本应用的通道，不碰 DSH 的插件、配置和进程。
+- **设置**（独立一页）：Key / 地址 / 模型 / 全家桶开关 / 上下文 / 路由 / 读链接 / 语音 / 主题 / 导入，顶部一行是「导入对话 JSON / 切换主题 / 本地 N 个会话 · M 条消息 · X token」。
+- **侧栏「调」**：鼠标移到某个会话上，右边出现「调」，点它就地弹出这个小弹层——改标题、模型、上下文预算（跟随全局或 4k…1M）、召回条数、半衰期，保存只影响这一个会话，不用打开它。
+
+**日历**：月网格（周日开头，42 格，今天有框、有事的日期下面带小蓝点），点某天看那天的安排；「＋ 新建日程」填标题 / 日期 / 开始 / 结束 / 备注。每条日程能「标记做完」「在会话里问」「删」。「在会话里问」会把这条日程丢进当前会话当一句话发出去——比如「下午三点牙医复诊，什么时候出门合适」。
+
+**日历**：月网格（周日开头，42 格，今天有框、有事的日期下面带小蓝点），点某天看那天的安排；「＋ 新建日程」填标题 / 日期 / 开始 / 结束 / 备注。每条日程能「标记做完」「在会话里问」「删」。「在会话里问」会把这条日程丢进当前会话当一句话发出去——比如「下午三点牙医复诊，什么时候出门合适」。
+
+日程存在 `data/calendar.json`，只在这台机器上。设置里「日程进上下文」（默认开）打开时，每次请求会把最近 3 天（`calendarDays` 可调）的日程作为一段 system 消息带给模型，所以问「我今天还有什么没做完」它答得上来。这一段能看到 `context` 事件里的 `schedule: {today, days, tokens}`。
+
+**时钟**：大钟 + 日期星期 + 今天剩几件 + 「今天还剩」与「接下来 7 天」（跳过已完成的）。
+
+**QQ**：走 OneBot 11 的 HTTP，跟 `dsh-qq-bridge` 插件用的是同一个后端、同一套 action，但**不经过 DSH 进程**——app 自己起一个轮询循环，也不读插件配置里的任何凭据。
+
+前提是先有后端：NapCat 在本机 `D:\NapCatOneKey`（`扫码登录.bat` / `start-napcat-A.bat`），起来后默认监听 `http://127.0.0.1:3000`，要扫码登录一次。
+
+**
+二维码卡片会自己说明这张码多旧：超过十分钟没更新就标黄字提醒「扫码八成会失败」，并给出两条路——「刷新二维码」只是把目录里那张图重读一遍（NapCat 没重出码时会明确告诉你「还是同一张码（N 天前的）」），「重启 NapCat 出新码」才会杀掉 NapCat 再重跑启动脚本、逼它重新出码（会断开当前登录，最多等 60 秒）。判断换码看文件内容 hash，不看 mtime——NapCat 覆盖写有时不改时间。
+扫码登录就在 QQ 页里做**：右上那格会显示 NapCat 状态和二维码——没起就点「启动 NapCat」（app 直接跑目录里的启动脚本），起好了点「刷新二维码」手动拉一次（app 会去目录里找最新的二维码图，10 分钟内的算新鲜），拿手机 QQ 扫，扫完点「检查是否已登录」，成功后那格变成账号昵称 + UID。
+
+二维码**开着 QQ 页时每 2 分钟自动刷新一次**：每次只请求 `GET /api/napcat/qr`（只读那张图，不探端口、不拉登录态），服务端按文件内容算 `hash`，图没变就不动 DOM、不闪；变了才换图并把「第 N 次刷新」+1。卡片上写着「更新于 hh:mm:ss · 第 N 次刷新 · 约每 120 秒自动刷新（mm:ss）」那个 `mm:ss` 是倒计时，到 0 就自动拉下一轮。切走页面自动停，回来重新开始。真扫码时 NapCat 重连会重写 `qrcode.png`，下一轮自动换上新码，不用手动点。
+
+QQ 页里：
+
+- 模式：`关 / 只发 / 收发`。只发=你从面板发消息过去；收发=把 QQ 上的新消息拉进来，在当前会话里跑一轮，再把回答发回 QQ。
+- 地址（默认 `http://127.0.0.1:3000`）、私聊 QQ 号、群号（填了群号走群）、轮询间隔（2–60 秒）、称呼（拼进提示里的「对方」）。
+- 「测试连接」拉 `get_login_info`；「立刻收一次」手动跑一轮；「从插件配置读地址」只读 `%USERPROFILE%\.dsh\qq-bridge-config.json` 里的 NapCat 地址 / 私聊号 / 群号 / 称呼四个字段，**只回报读到什么，不落盘**（要写进去得再点一次）。
+- 收发模式下，收进来的消息写成 `【来自 QQ 上的对方（QQ号），时间】正文`，自动用当前路由（通常 V4 Pro）回答；会话不存在时会自动建一个叫「QQ」的，后续都落在它里面。
+
+调试接口：`GET /api/napcat`（目录/端口/二维码/登录态）、`GET /api/napcat/qr`（只读最新二维码 + hash，给自动刷新用）、`POST /api/napcat/start`（拉起 NapCat）、`POST /api/napcat/restart`（杀掉旧进程并重跑启动脚本，逼它出新码）、`GET /api/channels`（插件页那六行的数据）、`GET /api/qq/state`（连接状态 + 最近收发）、`POST /api/qq/test`、`POST /api/qq/send {text}`、`POST /api/qq/poll`、`POST /api/qq/import-config {apply?:true}`；日历是 `GET|POST /api/calendar`、`PATCH|DELETE /api/calendar/:id`。
+
+QQ 这条链路是用本地假 OneBot 服务验的（`tools/qq-test.mjs` 自己起 3100 端口）；真号没连过——真连要你自己扫码。
+
+---
+
+## 导入 App 的导出记录
+
+App 里「设置 → 数据管理 → 导出对话记录」拿到的 JSON，直接：
+
+- 拖进窗口，或
+- 点左下角 **导入**，或多选文件
+
+文件里有 `messages` 数组就行（`{messages:[…]}`、`{data:{messages:…}}`、裸数组都认）；角色 `user/assistant/human/model` 都能识别；`reasoning` / `reasoning_content` / `think` / `thinking` 都当作深度思考内容。
+
+首次启动时也自动扫工作区里这两个文件（只导一次，记录在 `data/.auto-imported.json`）：
+
+- `../AI摸鱼写游戏.json`
+- `../delta/战地1弹震症士兵.json`
+
+导进来的是**只读的历史**——可以接着在同一个会话里继续问，历史会作为上下文发给 API。注意 `maxHistoryMessages` 默认限制只带最近多少条（设置里可改，0 = 不限），否则几十万字历史会把上下文撑爆。
+
+App 导出里那几条 content 为空的消息（App 里是空白的）会被跳过，不进库。
+
+**拖入压缩包直接整理成对话**：现在把 zip 拖进窗口就会自动拆包、认类型、整理成可以直接续聊的会话（不用再跑脚本）。
+
+| 拖进来的东西 | 判定 | 整理成什么 |
+| --- | --- | --- |
+| 桌面 App「导出全部数据」的 zip（含 chat_session_index.json） | deepseek-export | 按会话拆开，图片落到 data/media/imported-<id>/，思考过程保留 |
+| 任意含会话 JSON 的 zip | undle | 包里每个会话数组都变成对话 |
+| 资料包（md / txt / 代码 / 日志…） | rchive | 按顶层目录分 2–6 组，每组一个对话；正文是「【包名 · 分组】+ 文件清单 + 逐文件内容」 |
+| 单个 .md / .txt / .json | 	ext / JSON | 一份材料一个对话 |
+
+限制：单包 ≤200 MB、文本文件最多 60 个（单文件取前 6000 字、单会话 ≤4 万字）、图片/文档/二进制只跳过不报错；包里一个可读文本都没有会直接回 400 并说明原因。重名会话会被替换（不是叠加）。
+
+拖拽层只认「文件」拖入（拖选中文本不会触发），Esc 可收起；多文件一次拖进来会逐个整理，最后弹一条汇总。
+
+整包导出（桌面 App「导出全部数据」那个 zip）用脚本导，会连图片一起搬进来：
+
+```bash
+node tools/import-deepseek-export.mjs "C:\path\to\deepseek_data-2026-11-22.zip" --dry   # 先看统计
+node tools/import-deepseek-export.mjs "C:\path\to\deepseek_data-2026-11-22.zip"           # 真导（同名标题的旧会话会被替换）
+```
+
+脚本自己解 zip（不依赖任何库），把 `REQUEST/RESPONSE/THINK/FILE` 这几种 fragment 映射成消息、思考过程与附件：图片写到 `data/media/imported-<会话id>/`，工具调用过程（搜索、打开网页）跳过，同角色连续的 fragment 合并成一条消息。原始 `inserted_at / updated_at` 会保留——导入如果被刷成「今天」，时间衰减和「多少天前」就全错了。
+
+---
+
+## 目录
+
+```
+deepseek-app/
+├─ server.mjs          零依赖 HTTP 服务：会话存储、SSE 转发、文件/语音代理、导入导出
+├─ public/
+│  ├─ index.html       页面骨架
+│  ├─ styles.css       主题与布局
+│  ├─ md.js            Markdown / 数学 / 代码高亮（自写，不用 CDN）
+│  ├─ app.js           前端全部交互
+│  └─ vendor/          KaTeX、highlight.js 及字体（离线）
+├─ data/
+│  ├─ settings.json    设置（含 API Key，别外传）
+│  ├─ server.json      最近一次的监听地址
+│  ├─ app-profile/     独立窗口用的浏览器配置（删了会重新生成，不影响对话）
+│  ├─ uploads/         你传的图片与文档（文档另外在 DeepSeek 那边存一份 file_id）
+│  ├─ media/           视频/音频解析结果：转写 + 音轨 + 关键帧（原文件解析完即删）
+│  ├─ calendar.json    日程（标题/日期/时间/备注/做完没有）
+│  ├─ conversations/   一会话一个 JSON + index.json
+│  └─ archive/         压缩前的原文备份：<会话id>/<起始>-<结束>.json + index.json（含分段与可选向量）
+├─ calendar.mjs        日历纯函数：日期/星期/月网格/排序/未来 N 天/拼成提示词
+├─ qq.mjs              OneBot 11 HTTP 客户端：登录信息、收发消息、拉历史、去重、拼提示
+├─ context.mjs         上下文管理：token 估算、BM25 索引、稠密余弦、时间衰减、分档摘要与长期记忆提示词
+├─ fetchlink.mjs       读外链的两级兜底：HTTP 抓 HTML 抽正文 → 内嵌 Chromium 渲染
+├─ electron/main.cjs   桌面壳主进程：进程内起服务、开窗口、退出时一起关
+├─ dist/DeepSeek-win32-x64/   打包产物：DeepSeek.exe（双击这个）+ resources/app/ + data/（junction 回仓库 data/）
+├─ assets/app.ico      应用图标（tools/make-icon.mjs 用 ffmpeg 画的）
+├─ tools/              抓 vendor、冒烟/集成测试、假上游、装快捷方式
+├─ 启动应用.vbs        兜底启动器：有打包 exe 就开它，没有就走 node 服务 + Edge 独立窗口
+├─ 停止应用.vbs        双击 → 关掉后台服务
+├─ 启动.cmd            旧方式：起服务 + 浏览器标签页
+└─ package.json
+```
+
+## 图标与吉祥物
+
+- 应用图标用 `dsh-whale-widget` 的那张鲸鱼女仆头（`%USERPROFILE%\.dsh\profiles\desktop\node_modules\dsh-whale-widget\icon.png`）。换图标：`node tools/make-icon.mjs`（默认读上面那张，生成 16–256 七个尺寸打进 `assets/app.ico`）→ 重新打包 → 重跑 `tools/install-shortcut.ps1`。
+- 页面右下角是同一套素材里的半身像（`public/assets/dsniang.png`），点它随机说一句话，切到日历/QQ/插件/设置页会自动收起，回到对话再出现。
+- 浏览器标签页图标用 `public/assets/whale.png`。
+- 吉祥物那块 HTML 必须写在 `<script src="/app.js">` **前面**——`initMascot()` 在脚本执行时就要能找到 `#mascot`，放到后面会静默失效（点了没反应）。
+
+## 自测
+
+```
+node tools/smoke.mjs          # 接口检查（需服务已在 8787 跑着），51 项
+node tools/integration.mjs    # 全家桶链路（自己拉假上游 8899，不花钱、不用 Key），54 项
+node tools/lint-frontend.mjs  # 前端静态检查：HTML id ↔ JS 选择器、class ↔ CSS、接口是否存在
+node tools/test-md.mjs        # 拿真 KaTeX/highlight.js 跑 md.js，39 项
+node tools/check-assets.mjs   # index.html 引的本地资源是否都 200
+node tools/dom-check.mjs      # 真浏览器（无头 Edge）点一遍：新建/搜索/主题/设置整页/移动端/上下文面板（含本会话参数）/自动路由/日历·时钟页/QQ 页/插件页/侧栏「调」/无 Key 报错，113 项
+node tools/napcat-restart-test.mjs # 「重启 NapCat 出新码」：造假 NapCat 目录，验杀进程/重跑启动脚本/按 hash 认出新码，9 项，BASE 必填且不能是 8787
+node tools/qr-refresh-test.mjs # QQ 页二维码自动刷新（自造两张假码换图，验 hash/换图/第 N 次/倒计时/手动刷新提示），13 项，需先起一个隔离数据目录的测试服务
+node tools/dom-chat.mjs       # 真浏览器发一条联网消息（连假上游），验流式/过程卡片/引用角标/自动标题，30 项
+node tools/media-smoke.mjs    # 视频/音频解析链路（假上游 + 真 ffmpeg）：抽帧、转写、两段式（Flash 扒要点 → Pro 写正文、第二遍不带图），23 项
+node tools/context-test.mjs   # 上下文：token 估算/分词/召回/衰减/压缩提示词/本机摘要/归档/分档概要/遗忘/渐进展开/每会话参数/记忆整合，97 项
+node tools/app-check.mjs      # 连上正在跑的应用窗口（需带 --remote-debugging-port=9333 启动），校验页面真的活了 + 内嵌内核读 JS 页，12 项
+node tools/shot-ctx.mjs <会话id> [查询词]  # 重新截上下文面板/设置（无头 Edge，需要服务在跑）
+node tools/link-test.mjs      # 读链接：HTML 抽正文/实体/链接抽取、HTTP 那一级、兜底顺序、/api/read-url、聊天预读注入，36 项
+node tools/route-test.mjs     # 自动路由：判断表 + 四档真链路（专业对话/带思考/混合两次调用/音视频两段式）与手动会话不受影响，47 项
+node tools/demo-route.mjs     # 造一个「自动路由」演示会话并截图（连假上游，跑完打印会话 id）
+node tools/calendar-test.mjs  # 日历：纯函数 + 增删改查 + 日程进上下文（连假上游），48 项
+node tools/qq-test.mjs        # QQ：自己起假 OneBot 3100，验登录/只发/收消息去重/收发一轮/群模式/故障/设置校验/读插件配置，35 项
+node tools/shot-day.mjs       # 截日历/时钟/QQ 三张面板图（临时造日程与假 OneBot，跑完还原）
+node tools/demo-archive-conv.mjs   # 造一个「压缩记忆 + 原文归档」演示会话（连假上游，跑完打印会话 id）
+node tools/demo-archive-conv.mjs --clean <会话id>  # 删掉演示会话和它的归档目录
+node tools/mock-upstream.mjs  # 假上游（正常由 integration / dom-chat / media-smoke 自动拉起）
+node tools/vendor.mjs         # 重新下载 KaTeX / highlight.js（一般不用）
+node tools/fonts.mjs          # 补齐 KaTeX 字体
+node tools/make-icon.mjs      # 重新生成 assets/app.ico（需要 ffmpeg）
+powershell -ExecutionPolicy Bypass -File tools\install-shortcut.ps1   # 重建桌面/开始菜单快捷方式
+```
+
+`integration.mjs` 和 `dom-chat.mjs` 会把设置临时指向假上游跑一遍，跑完还原——期间不会碰真 Key，也不产生费用。
+
+`dom-*.mjs` 会启动本机 Edge 的无头模式（找不到可以设环境变量 `EDGE_PATH`）；它们跑完会把自己造的空会话删掉。
+
+`media-smoke.mjs` 需要本机 ffmpeg；测试素材（9 秒测试视频、4 秒测试音）缺了会自己现场造。
+
+## 验到什么程度
+
+2026-11-21 用真 Key 逐个跑过：联网搜索、深度思考（低/高/最高）、读链接、图片理解（让它读一张截图上的按钮文字）、PDF 文档问答、语音合成 → 语音识别闭环、视频解析（转写 + 6 帧，问「这段语音说了什么」答得对）、继续生成、内容安全开关、`deepseek-v4-pro` 纯文本。
+
+浏览器端也端到端握过一遍：从附件按钮选真实视频 → 解析 → 发送 → 关键帧缩略图与转写折叠面板渲染 → 模型答对；附件条、音频附件、深浅主题、手机宽度都截图核对过。
+
+没验到的两处：麦克风真机录音（无头浏览器没有麦克风设备，走的是同一套 ASR 接口，接口本身验了）、真实手机上的触摸操作。
+
+---
+
+## 几个实现上的坑（改代码时留意）
+
+- **带 `tools` 的请求必须回传历轮的 `reasoning_content`，否则 400**；不带 tools 时反而不能传（传了也被忽略）。所以 `buildMessages` 只在联网时才把思考内容拼回历史。
+- **`server_tool_calls` 要原样回传**（连同 `kind` 与 `signature`）。`signature` 是加密后的网页正文，丢了网页内容就进不了下一轮上下文。
+- **声明 `tools` / `safety_check` / `title` 之后，`temperature` 等采样参数会被忽略**（不报错但也不生效）。所以只有在纯聊天时才把 `temperature` 放进去。
+- **流式末块可能把全量 `content` / `reasoning_content` 再下发一遍**，直接追加会重复；服务端对带 `finish_reason` 的块做了去重。
+- **`latest_reminder` 必须紧贴在其所属 user 消息之前**（日期,星期,地点,平台,语言），否则 400；它是用户元信息，回传历史能提高缓存命中。
+- **Files API 的 multipart 里 `purpose` 字段必须排在 `file` 之前**，否则解析失败；`TXT/MD/CSV/JSON/代码/xlsx/xls/epub/mobi` 用 `user_data`（转 Markdown、不计费），其余走 `text_recognition`。
+- **继续生成**走 `/beta/chat/completions`，最后一条 assistant 加 `"prefix": true`；用过联网工具的回复不能续写（上游 400）。
+- **停止生成**走 `AbortController` → 服务端 `res.on('close')` 感知后中止上游 fetch，并把**已经生成的部分**存盘；前端再回读一次，最多等 1.5 秒避开落盘竞态。
+- **落盘顺序**：所有错误分支都是「先存会话、再发 error、最后 end」，否则客户端拿到响应结束立刻读文件会读到旧内容。
+- **SSE 收尾顺序是 usage → title → warning → done**，`done` 必须是最后一个事件。
+- 长会话只渲染最近 80 条，往上滚再加载，否则三千条消息的 DOM 会卡。
+- **`启动.cmd` / `启动应用.vbs` 必须是 CRLF 换行**。用 LF 存盘时 cmd.exe 解析不了多行 `if (` 直接退出，表现就是「双击没反应」；VBS 也一样，改完记得转回 CRLF。
+- **装快捷方式的 PowerShell 脚本要存成带 BOM 的 UTF-8**。Windows PowerShell 5.1 把无 BOM 的 UTF-8 当 ANSI 读，只要脚本里出现中文文件名（`启动应用.vbs`）就会「找不到文件」。
+- 双击两次不会起两个服务：第二次检测到 `data/server.json` 里的端口还活着，只打开它、然后退出（退出码 3，启动脚本据此不提示「已退出」）。要强制再起用 `--force`。
+- 旧设置里如果存着 `deepseek-chat` / `deepseek-reasoner` 这种历史模型名，服务端会自动迁移到 `deepseek-flash`，不用手动改。
+- **没有「视频理解」这种 API**。视频是本地拆开的：ffmpeg 抽音轨 → 按 ≤110 秒切片 → 逐片调 `/v1/tools/asr` 转写 → 再按时间均匀抽关键帧，最后把「转写文本 + 几张图」当普通图文消息发过去。所以视频理解的上限取决于转写质量与抽帧密度；帧数在设置里可调（0–12，默认 6）。
+- 每条消息最多回传 12 帧（`mediaBlocks` 里切），单帧最长边缩到 1280 再编码，免得一次请求体撑爆 48 MiB。
+- **本机没有 embeddings 接口可用**，所以历史「向量索引」是词面的（BM25 + 词表维度），不是语义向量：认词、不认近义词。别在 README/界面上把它说成语义检索。语义那点能力是 ollama 的 embed 模型给的，且只用在归档区间上。
+- **ollama 里带思考的模型（qwen3 系列等）会把正文塞进 `message.thinking`、`content` 留空**。压缩摘要时请求里加了 `think: false`，400 就退回不带该参数、并把 thinking 当兜底——不加这一步，摘要永远是「本地模型返回了空摘要」（实测 qwen3.5:4b）。
+- 归档的 `from/to` 是**历史数组下标**（user/assistant 过滤后的），不是 `conv.messages` 下标；两套下标混用会让召回的「第几条」和年龄全错。改归档相关代码时统一用 `history[...]`。
+- 召回的相关度阈值（默认 0.08）只看相关度，时间衰减只调排序优先级——否则几十天前的老会话会被权重直接判死、召回全空。
+- **分档压缩的触发看「历史总 token / budget」这个 raw 比例**，不是压缩后的占用——否则压完比例掉回去，永远涨不到下一档。`step = floor(raw / 0.33)`、`forgetStep = floor(raw / 0.5)`，各自和 `memory.step / memory.forgetStep` 比大小，涨了才动。
+- **「展开第 k 条」靠 `indexCardsCache`**：本轮用户消息是「展开第 1 条」这种话，拿它去检索是召不到东西的，所以展开前先取**上一轮给模型看过的索引卡**（`convId → cards`，最多 32 条）。没有缓存就展开不了。
+- 记忆关键词按**消息 DF**（跨消息出现次数）抽，不按词频——一条消息里重复几十遍的填充文本会把词频骗高。短会话凑不出共同词时才退回词频，那时关键词会有点噪声。
+- **改了 `context.mjs` 一定要重启服务**（`node server.mjs --stop` 再起），它是启动时 import 的；不重启跑测试会继续用旧模块，改动静默失效。
+- 读链接的三级是「API 工具 → HTTP 抓 → 内嵌内核」，但**只有桌面版有第三级**：`fetchlink.mjs` 用 `import('electron')` 探测，纯 node 环境拿不到 `BrowserWindow` 就跳过，并把原因写进 `error`（「没有内嵌内核」），不会假装读到。
+- 内嵌内核那个隐藏窗口关掉了图片（`images:false`）只取文字，别指望它能截全彩页面；有些站检测 headless / 缺少 cookie 会只给骨架，这时拿到的正文很短，会照实返回、由上层提示「正文太少」。
+- **本机 1.5b 小模型偶尔会把提示词或原文复述回来**：`summaryLooksBad()` 会判它不合格（太短 / 长度接近原文 / 没有结论性小标题 / 在复述提示词），直接改用 API 重写，别让复述混进记忆。给本机的原文输入也收窄到 6000 字（1.5b 喂太长就会复述），API 那边给满。
+- **假上游改了代码要重启**：`mockUp()` 发现 8899 已经有进程就直接复用，跑测试时可能还是旧版本（表现出来像「新写的记录逻辑没生效」）。改 `tools/mock-upstream.mjs` 之后先杀掉 8899 上的进程再跑。
+- **混合模式的 `route` 事件是等大纲写完才发的**：第一遍失败降级时也会补发一次，所以前端只该在收到事件后贴标签；别在 `start` 时就假定有 `draft`。
+
+- **Electron 起不来时先查两件事**：环境变量 `ELECTRON_RUN_AS_NODE` 如果被设成 1，electron 会退化成纯 Node 跑（报 `app is undefined`），要先清掉；在受限的进程沙箱里跑还要加 `--no-sandbox`（单实例锁要用命名管道，沙箱里会直接崩）。正常双击快捷方式不受这两条影响。
+- **打好的 exe 里服务是进程内跑的**（主进程 `import()` 了 `server.mjs`），所以不再依赖系统 node；`DSAPP_DATA` 可以让它指向别处的数据目录，打包版默认用 exe 旁边的 `data/`。
+- **重新打包后 `dist\DeepSeek-win32-x64\data` 的 junction 会跟着被删**（packager 覆盖输出目录），记得重建，否则应用会看成空数据。
+- `@electron/packager` 的 bin 是 `bin/electron-packager.mjs`（不是 `.js`）；electron 的二进制要手动跑 `node node_modules\electron\install.js` 才会下载（npm 的 postinstall 有时被跳过）。
+- **日历里的日期一律用本地零点**（`calendar.mjs` 的 `parseDate`），别拿 `new Date('2026-11-22')` 直接比：那是 UTC 解析，东八区会错一天。`sortEvents` 的顺序是「先日期、再时间（全天算 00:00）、最后标题」。
+- **OneBot 的成败看 `status` 字段，不是 HTTP 码**：`{"status":"failed","message":…}` 也是 200，只看状态码会把失败当成功。
+- **QQ 轮询必须过滤掉自己发的消息**（`user_id === 登录号`），否则收发模式下会自己跟自己无限对话；去重靠 `message_id` 的 `seen` 集合（只留最近 300 条）。
+- **`qqConversation()` 建完会话必须回写 `qqConvId`**，不然每收一条消息就新建一个「QQ」会话。
+- **测 QQ 别依赖真号**：`tools/qq-test.mjs` 自己起假 OneBot（3100），每次跑用不同 `message_id`，否则同一进程里第二次跑会被去重吃掉。真连之前 NapCat 要扫码登录、3000 端口得开着。
+
+## 已知限制
+
+- 单个会话几千条消息时，搜索是全量内存扫（本机数据量级完全够用）。
+- 导入的会话没有原始时间戳（App 导出文件里就没有），时间衰减用的「年龄」是按消息位置在会话首尾之间插值算的，不是真实时间。
+- 界面是桌面网页，不是原生 App；没有推送通知和后台任务。
+- 本机摘要模型默认挑「最小的对话模型」（现在会自动选 qwen2.5:1.5b-instruct）：写一段摘要 100–150ms，首次调用要加载模型（几秒）。想换也可以在设置里手动选。
+- 归档原文只存被压缩那几段，`data/archive` 会随长会话增长；删会话时不会自动删归档目录（原文备份留着手动清）。
+- 语音输入要允许浏览器用麦克风（`127.0.0.1` 属于安全上下文，不用 HTTPS）；录音会先转成 16 位 PCM WAV 再发，最长 110 秒。
+- 上传的单个文件 ≤100 MiB / ≤1000 页，一次最多 20 个文档；图片每张 ≤32 MiB。
+- 视频/音频单个 ≤300 MiB；音轨按 110 秒切片逐片识别，长视频会按音频时长计费（0.39–0.78 元/小时），另加抽帧的图片 token。
+- 联网搜索、读链接、内容安全这些是 DeepSeek 服务端工具，按官方计价规则可能产生额外费用；具体看官方文档。
+- 文件是「上传一次、长期引用」：删了本机 `data/uploads/` 里的文件不影响已经发出去的消息（那边存的是 file_id），但重新发送那条消息时会找不到附件。
+## 启动器与安装包
+
+- **原生启动器**：`launcher/launcher.cpp`（Win32，无第三方依赖）。`launcher/build.ps1` 用 MSVC 编译（`call vcvars64.bat` → `rc` 编图标 → `cl /utf-8 /MT /O2`），产物 `launcher/out/DeepSeekLauncher.exe` 会同时拷到 `dist/DeepSeek-win32-x64/DeepSeekLauncher.exe`。
+- 它负责：单实例、拉起 `DeepSeek.exe`（先裸启动，2.5 秒内退出就带 `--no-sandbox` 重试）、托盘菜单（打开应用 / 在浏览器打开 / 内存优化 / 退出）、每 10 分钟自动做一次工作集裁剪。应用若已在 8787～8804 任一端口上跑着，它直接用那个端口，不会重复启动。
+- 手动内存优化：`DeepSeekLauncher.exe --trim`。它只把工作集页挪到 standby（实测 43.9→0.0 MB），**私有提交不变**（290.4 MB），所以别指望它降低实际占用峰值，只是让内存条歇一会儿。
+- **安装包**：`installer/deepseek-local.iss` + Inno Setup 6（`ISCC.exe` 在 `%LOCALAPPDATA%\Programs\Inno Setup 6\`）。编译命令：
+  ```powershell
+  & "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" installer\deepseek-local.iss
+  ```
+  产物 `dist/installer/DeepSeekLocal-Setup-1.0.1.exe`（约 105 MB，按当前用户装、免管理员，默认目录 `%LOCALAPPDATA%\Programs\DeepSeekLocal`）。
+- 打包前记得：`dist/DeepSeek-win32-x64/data` 是指向仓库 `data/` 的 junction（装着你的会话数据），`.iss` 里用 `Excludes: "data,data\*"` 排除它；`dist/DeepSeek-win32-x64/locales` 只留 `en-US/zh-CN/zh-TW.pak` 能省 47 MB。
+- 安装后数据在 `%LOCALAPPDATA%\DeepSeekLocal\data`，第一次启动是空会话列表；卸载**不会**删这个目录（用户数据留着）。
+- 装的时候需要写桌面快捷方式和 `HKCU` 卸载键，必须用你自己的账户在资源管理器里双击安装包；在沙箱化/受限令牌的进程里跑会以 `0x80070005 拒绝访问` 回滚（详见日志 `%TEMP%\*.log`）。

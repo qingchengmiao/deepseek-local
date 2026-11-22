@@ -1,0 +1,412 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>DeepSeek Local 功能介绍</title>
+<style>
+  @page { size: A4; margin: 14mm 12mm 16mm; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+    color: #16202e;
+    font-size: 10.6pt;
+    line-height: 1.62;
+    counter-reset: sec;
+  }
+  /* ---------- 封面 ---------- */
+  .cover {
+    height: 262mm;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    text-align: center;
+    page-break-after: always;
+  }
+  .cover .logo {
+    width: 26mm; height: 26mm; border-radius: 9mm;
+    background: linear-gradient(160deg, #6c83ff, #4d6bfe 55%, #3f56d8);
+    color: #fff; font-size: 15mm; font-weight: 700;
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 6mm 14mm -6mm rgba(77,107,254,.55);
+  }
+  .cover h1 { font-size: 25pt; margin: 9mm 0 2mm; letter-spacing: .5mm; }
+  .cover .sub { font-size: 12pt; color: #55606f; margin-bottom: 1mm; }
+  .cover .meta { margin-top: 12mm; font-size: 9.6pt; color: #7b8494; line-height: 1.9; }
+  .cover .rule { width: 36mm; height: 1.2mm; background: #4d6bfe; border-radius: 1mm; margin: 6mm 0; }
+
+  /* ---------- 版式 ---------- */
+  h2 {
+    counter-increment: sec;
+    font-size: 14pt;
+    margin: 0 0 3.4mm;
+    padding-bottom: 1.6mm;
+    border-bottom: 0.45mm solid #dfe4ee;
+    page-break-after: avoid;
+  }
+  h2::before {
+    content: counter(sec) ". ";
+    color: #4d6bfe;
+    font-weight: 700;
+  }
+  h3 { font-size: 11.4pt; margin: 4mm 0 1.6mm; page-break-after: avoid; }
+  p { margin: 0 0 2.4mm; }
+  ul { margin: 0 0 2.6mm; padding-left: 5.2mm; }
+  li { margin: 0.8mm 0; }
+  code {
+    font-family: Consolas, "Cascadia Mono", monospace;
+    font-size: 9.4pt;
+    background: #f1f4fa; border: 0.2mm solid #e2e8f4;
+    border-radius: 1mm; padding: 0.2mm 1mm;
+  }
+  .lead { color: #4a5361; }
+  .muted { color: #78818f; font-size: 9.4pt; }
+
+  section { page-break-inside: auto; margin-bottom: 7mm; }
+  section.first { page-break-before: always; }
+
+  /* ---------- 图 ---------- */
+  figure {
+    margin: 3mm 0 4mm;
+    page-break-inside: avoid;
+  }
+  figure img {
+    width: 100%;
+    border: 0.3mm solid #dfe4ee;
+    border-radius: 2mm;
+    display: block;
+    background: #fff;
+  }
+  figure.small img { width: 76%; margin: 0 auto; }
+  figcaption {
+    margin-top: 1.6mm;
+    font-size: 9pt;
+    color: #78818f;
+    text-align: center;
+  }
+  .pair { display: flex; gap: 3mm; page-break-inside: avoid; }
+  .pair figure { flex: 1; margin: 0; }
+
+  /* ---------- 表格 ---------- */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 2mm 0 3.4mm;
+    font-size: 9.6pt;
+    page-break-inside: avoid;
+  }
+  th, td {
+    border: 0.25mm solid #dfe4ee;
+    padding: 1.5mm 2.2mm;
+    text-align: left;
+    vertical-align: top;
+  }
+  th { background: #f4f6fb; font-weight: 700; }
+  td.num { white-space: nowrap; }
+
+  /* ---------- 卡片 / 提示 ---------- */
+  .note {
+    border-left: 1mm solid #4d6bfe;
+    background: #f5f7ff;
+    padding: 2.4mm 3mm;
+    border-radius: 0 1.6mm 1.6mm 0;
+    margin: 0 0 3.4mm;
+  }
+  .warn {
+    border-left: 1mm solid #f0a53e;
+    background: #fff8ef;
+    padding: 2.4mm 3mm;
+    border-radius: 0 1.6mm 1.6mm 0;
+    margin: 0 0 3.4mm;
+  }
+  .grid2 { display: flex; gap: 3mm; page-break-inside: avoid; }
+  .grid2 > div { flex: 1; }
+  .kpis { display: flex; gap: 3mm; margin: 2mm 0 4mm; page-break-inside: avoid; }
+  .kpi {
+    flex: 1; border: 0.3mm solid #dfe4ee; border-radius: 2mm;
+    padding: 2.6mm 2mm; text-align: center;
+  }
+  .kpi b { display: block; font-size: 14pt; color: #3448c5; }
+  .kpi span { font-size: 8.8pt; color: #78818f; }
+  footer {
+    margin-top: 6mm; padding-top: 2.4mm;
+    border-top: 0.25mm solid #e6eaf2;
+    font-size: 8.8pt; color: #8d95a3; text-align: center;
+  }
+</style>
+</head>
+<body>
+
+<div class="cover">
+  <div class="logo">D</div>
+  <h1>DeepSeek Local</h1>
+  <div class="sub">把官方 App 的体验，接到你自己的 API 上</div>
+  <div class="rule"></div>
+  <div class="sub" style="font-size:10.4pt">功能介绍 · 安装说明 · 沙盒验收报告</div>
+  <div class="meta">
+    版本 1.0.1　|　Windows x64 桌面应用<br>
+    安装包 DeepSeekLocal-Setup-1.0.1.exe（104.6 MB）<br>
+    文档生成于 2026-11-22
+  </div>
+</div>
+
+<section class="first">
+  <h2>这是什么</h2>
+  <p class="lead">
+    DeepSeek Local 是一个跑在你自己电脑上的 DeepSeek 客户端：界面照着官方 App 做，但每一句话都由
+    <b>你自己的 API Key</b> 发出，对话记录只落在本机硬盘里。
+  </p>
+  <p>
+    它由四块组成：一个零依赖的 Node 服务（<code>server.mjs</code>，默认 8787 端口）、一套原生前端
+    （<code>public/</code>，无框架）、一个 C++ 原生启动器（托盘、单实例、内存裁剪），以及一个
+    Inno Setup 安装包。除了调用 DeepSeek 官方接口和（可选）本机 Ollama，其余全在本机闭环。
+  </p>
+  <div class="kpis">
+    <div class="kpi"><b>18</b><span>内置功能模块</span></div>
+    <div class="kpi"><b>25/25</b><span>沙盒端到端断言</span></div>
+    <div class="kpi"><b>104.6 MB</b><span>安装包体积</span></div>
+    <div class="kpi"><b>134</b><span>安装文件数</span></div>
+  </div>
+  <table>
+    <tr><th style="width:26%">你是这样的用户</th><th>它解决什么</th></tr>
+    <tr><td>有自己的 API Key</td><td>不想按 App 的额度用，想按自己的账单跑；想开就开，日志都在本地。</td></tr>
+    <tr><td>会话很长、资料很多</td><td>长对话自动压缩成结构化记忆，旧内容按时间衰减检索，不塞爆上下文。</td></tr>
+    <tr><td>手上是压缩包/导出文件</td><td>拖进窗口就整理成会话，接着聊。</td></tr>
+    <tr><td>要联网、要看视频、要读链接</td><td>联网搜索、深度思考、读链接兜底、音视频两段式解析，全在一个输入框里。</td></tr>
+  </table>
+</section>
+
+<section>
+  <h2>安装与第一次启动</h2>
+  <p>双击 <code>DeepSeekLocal-Setup-1.0.1.exe</code>，中文向导，一路「下一步」即可。默认装到
+  <code>%LOCALAPPDATA%\Programs\DeepSeekLocal</code>，按当前用户安装，不需要管理员权限。</p>
+  <ul>
+    <li>装完会在桌面和开始菜单生成「DeepSeek Local」，指向 <code>DeepSeekLauncher.exe</code>。</li>
+    <li>用户数据独立存放在 <code>%LOCALAPPDATA%\DeepSeekLocal\data</code>，升级/重装不会覆盖。</li>
+    <li>卸载走系统「应用和功能」，会先结束正在运行的进程再删程序文件；<b>不会</b>删你的对话数据。</li>
+  </ul>
+  <div class="note">
+    <b>关于「错误 5 拒绝访问」：</b>早前版本如果安装包是从受限目录（带 Low 完整性标签的位置）双击运行的，
+    Windows 会拒绝它写程序目录和注册表。现在分发包已提升为 Medium 完整性标签并加了安装日志开关，
+    双击即可正常安装；万一失败，日志会自动写到 <code>%TEMP%\Setup Log*.txt</code>。
+  </div>
+  <h3>第一次打开要做的两件事</h3>
+  <ul>
+    <li>左下角「设置」→ 填 DeepSeek API Key（只存本机 <code>data/settings.json</code>）。</li>
+    <li>需要联网/深度思考时在输入框下面的胶囊里打开；默认模型选「自动（按内容路由）」最省心。</li>
+  </ul>
+</section>
+
+<section>
+  <h2>主界面</h2>
+  <p>左侧是会话列表（按「今天 / 最近 7 天 / 最近 30 天 / 更早」分组，带相对时间），顶部是标题与上下文占用条
+  （顶部那根横条会随上下文预算变橙或变红），底部是输入区。整页在 900px 以下自动切成单栏。</p>
+  <figure>
+    <img src="../data/shots/62-ui-浅色-对话.png" alt="浅色主题对话页">
+    <figcaption>图 1　浅色主题：800px 正文宽度、逐段排版、引用角标、右下角吉祥物</figcaption>
+  </figure>
+  <figure>
+    <img src="../data/shots/62-ui-深色-对话.png" alt="深色主题对话页">
+    <figcaption>图 2　深色主题：同一套布局，配色独立调过对比度</figcaption>
+  </figure>
+  <div class="pair">
+    <figure>
+      <img src="../data/shots/62-ui-浅色-空状态.png" alt="欢迎页">
+      <figcaption>图 3　欢迎页与四个示例入口</figcaption>
+    </figure>
+    <figure>
+      <img src="../data/shots/46-真机-手机.png" alt="窄屏布局">
+      <figcaption>图 4　窄屏：侧栏收起为抽屉，工具条单行可横滑</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section>
+  <h2>输入区：一个输入框，装下全部开关</h2>
+  <p>
+    输入框是<b>单层</b>的：不再有「框里套一个筐」的观感，聚焦时是一圈柔和光晕而不是硬边框；
+    下面的胶囊从左到右是：附件、联网、深度思考、混合模式、思考强度、语音。
+  </p>
+  <div class="pair">
+    <figure>
+      <img src="../data/shots/60-输入框-现在-light.png" alt="改造前输入框">
+      <figcaption>图 5　改造前：内层浅底 + 外圈描边，两层矩形</figcaption>
+    </figure>
+    <figure>
+      <img src="../data/shots/61-输入框-改后-light.png" alt="改造后输入框">
+      <figcaption>图 6　改造后：单层表面，聚焦只加光晕</figcaption>
+    </figure>
+  </div>
+  <ul>
+    <li><b>联网</b>：打开后模型可主动搜、可读链接；关掉就纯离线推理。</li>
+    <li><b>深度思考</b>：先想再答；旁边的「高 / 中 / 低」控制思考强度。</li>
+    <li><b>混合模式</b>（二分树图标）：先让 V4.1 Flash 出一份大纲，再让 V4 Pro 按大纲把正文写完。</li>
+    <li><b>语音</b>：输入语音转文字，回答也能朗读出来。</li>
+    <li><b>附件</b>：图片、文档、音频、视频都能直接丢进去；视频会自动抽关键帧并转写。</li>
+  </ul>
+  <figure>
+    <img src="../data/shots/47-混合模式-输入框.png" alt="混合模式与思考强度">
+    <figcaption>图 7　混合模式打开、思考强度切换</figcaption>
+  </figure>
+</section>
+
+<section>
+  <h2>全家桶能力</h2>
+
+  <h3>按内容自动路由</h3>
+  <p>模型选「自动」时，每条消息会先判意图：闲聊交给 V4 Pro，逻辑/计算/排错交给 V4.1 Flash（带思考），
+  要写成篇的东西先 Flash 出大纲再用 Pro 润色。回答顶部会标出「自动路由 · 逻辑思考 · V4.1 Flash」。</p>
+  <figure class="small">
+    <img src="../data/shots/19-自动路由.png" alt="自动路由标签">
+    <figcaption>图 8　路由结果直接标在回答上方，可核对</figcaption>
+  </figure>
+
+  <h3>按对话自动调提示词与温度</h3>
+  <p>
+    每一轮先看这段对话长什么样：是代码、数学、创作、事实问答还是短闲聊，是第几轮、累计多少 token、有没有附件。
+    然后临时改这一轮的 temperature（代码 0.35 / 数学 0.30 / 创作 +0.15 / 事实 0.55 / 短问 0.85，长对话再降 0.15），
+    并追加一小段只作用于这一轮的系统提示。回答上方会标一个「自适应 · 温度 x」的角标，
+    不会改动你在设置里写的默认温度。
+  </p>
+  <figure>
+    <img src="../data/shots/63-设置-自适应-light.png" alt="设置页的自适应开关">
+    <figcaption>图 9　设置页：自适应开关、各档模型、上下文预算、检索条数、半衰期</figcaption>
+  </figure>
+
+  <h3>音视频两段式</h3>
+  <p>发视频/音频时，先让快模型把转写与抽帧压成一份要点清单，再让 Pro 按要点回答——比一次性把长转写塞给大模型省一半以上 token，也更少跑题。</p>
+  <figure class="small">
+    <img src="../data/shots/50-音视频两段式-标签.png" alt="音视频两段式标签">
+    <figcaption>图 10　「音视频 · V4 Pro · Flash 要点 186 字」：能看出走了两段</figcaption>
+  </figure>
+</section>
+
+<section>
+  <h2>拖入压缩包，一键整理成对话</h2>
+  <p>把文件拖进窗口，整个界面会浮起一层虚线提示卡，松手即开始整理。四种判定：</p>
+  <table>
+    <tr><th style="width:30%">你拖进来的</th><th>它会怎么处理</th></tr>
+    <tr><td>DeepSeek 导出包（含 <code>chat_session_index.json</code>）</td><td>按官方结构还原每个会话（含思考过程、引用、图片），图片落到 <code>data/media/imported-*/</code></td></tr>
+    <tr><td>任意含会话数组的 JSON 整包</td><td>识别 <code>conversations</code> / <code>messages</code> 字段，逐个导入</td></tr>
+    <tr><td>普通资料压缩包</td><td>按顶层目录分成 2–6 组，每组生成一个「资料包 · 目录名」会话，正文是文件清单 + 内容</td></tr>
+    <tr><td>单个 <code>.md</code> / <code>.txt</code> / <code>.json</code></td><td>当成一份材料，生成一个会话</td></tr>
+  </table>
+  <figure>
+    <img src="../data/shots/57-拖拽层-激活.png" alt="拖拽提示层">
+    <figcaption>图 11　拖拽时的全屏提示层：半透明毛玻璃 + 虚线卡片，按 Esc 可取消</figcaption>
+  </figure>
+  <div class="warn">
+    <b>限制（都是防止一次吞掉整台机器）：</b>单包 ≤ 200 MB；只认文本类文件，最多 60 个、单文件取前 6000 字、
+    单个会话累计 4 万字；图片/文档/二进制不会硬塞给模型；压缩包里一个文本都没有时直接报错并说明原因。
+    同名会话再次导入会替换旧的，不会叠两份。
+  </div>
+</section>
+
+<section>
+  <h2>上下文与记忆</h2>
+  <p>
+    长对话不会被硬截断，而是分四层管：最近的热区原样发送；更早的消息压成结构化摘要（事实 / 决定与理由 / 偏好 / 未完成）；
+    历史片段建本地词面索引，按当前提问召回；再按半衰期做时间衰减，太久的内容只留一行关键词提示。
+    顶部「N% 记」就是上下文占用，点开能看到压缩记录，每条都能展开回原文（原文在 <code>data/archive/</code>）。
+  </p>
+  <div class="pair">
+    <figure>
+      <img src="../data/shots/13-上下文面板-暗色.png" alt="上下文面板">
+      <figcaption>图 12　上下文面板：预算占用、压缩记录、召回预览</figcaption>
+    </figure>
+    <figure>
+      <img src="../data/shots/16-压缩记录与展开.png" alt="压缩记录展开">
+      <figcaption>图 13　每条压缩都能展开回原文，不丢细节</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section>
+  <h2>日历、时钟与 QQ 通道</h2>
+  <p>
+    「日历」整页是月视图 + 今天/未来 7 天清单，事件可以「在会话里问」一键丢进对话；开了「日程进上下文」，
+    模型每轮都知道你最近几天的安排。「时钟」是当前时间、今天还剩什么、接下来 7 天。
+    「QQ」走 OneBot 11 HTTP，连的是你自己的 NapCat；关 / 只发 / 收发三档，二维码过期会明说「这张码是几天前的」，
+    也能一键重启 NapCat 逼它出新码。
+  </p>
+  <div class="pair">
+    <figure>
+      <img src="../data/shots/25-页面-日历与时钟.png" alt="日历与时钟页">
+      <figcaption>图 14　日历 · 时钟整页</figcaption>
+    </figure>
+    <figure>
+      <img src="../data/shots/26-页面-QQ.png" alt="QQ 通道页">
+      <figcaption>图 15　QQ 通道：连接状态、二维码、收发记录、模式设置</figcaption>
+    </figure>
+  </div>
+  <figure>
+    <img src="../data/shots/55-插件页-没有浏览器通道.png" alt="插件与通道页">
+    <figcaption>图 16　「插件与通道」一页总览：每条通道的开关与状态都在这里</figcaption>
+  </figure>
+</section>
+
+<section>
+  <h2>C++ 启动器与内存</h2>
+  <p>
+    桌面图标指向的不是 Electron 本体，而是一个 0.3 MB 的原生启动器：双开只会有一个实例；服务没起就替你
+    拉起（沙箱冲突时自动加 <code>--no-sandbox</code> 重试）；8787 被占用会自动顺延扫描端口；
+    托盘菜单有「打开应用 / 在浏览器打开 / 内存优化 / 退出」；退出时进程树一起收干净。
+  </p>
+  <table>
+    <tr><th style="width:34%">项目</th><th>实测值</th></tr>
+    <tr><td>启动耗时（冷启到窗口可点）</td><td class="num">约 4–6 秒（含 Node 服务就绪）</td></tr>
+    <tr><td>常驻内存（4 个 Electron 进程合计）</td><td class="num">约 366 MB</td></tr>
+    <tr><td>「内存优化」后的工作集</td><td class="num">43.9 MB → 0.0 MB（页转入 standby，回前台即恢复）</td></tr>
+    <tr><td>私有提交（真实占用）</td><td class="num">290.4 MB → 290.4 MB（不变，如实标注）</td></tr>
+    <tr><td>自动优化节奏</td><td class="num">每 10 分钟一次，托盘可手动触发</td></tr>
+    <tr><td>安装包</td><td class="num">104.6 MB（locales 从 55 个精简到 3 个，省约 47 MB）</td></tr>
+  </table>
+  <div class="note">
+    关于「内存优化」的诚实说明：<code>SetProcessWorkingSetSize(-1,-1)</code> 只是把工作集页挪到 standby，
+    不会减少私有提交。所以面板里两个数字都报，避免「一键省了 300 MB」这种假象。
+  </div>
+</section>
+
+<section>
+  <h2>沙盒验收：从安装到功能</h2>
+  <p>
+    为了排除「我这台机器上能跑」的偶然性，整套流程在一次性沙盒里重跑过一遍：静默安装到独立目录 →
+    全新数据目录 → 指向本地假上游（mock，不花真 token）→ 逐项断言。
+  </p>
+  <table>
+    <tr><th style="width:42%">验收项</th><th>结果</th></tr>
+    <tr><td>静默安装（/VERYSILENT，独立目录）</td><td>exit 0，134 文件 / 316.9 MB，桌面快捷方式与卸载键均创建成功</td></tr>
+    <tr><td>安装包瘦身</td><td>locales 仅 en-US / zh-CN / zh-TW 三个 pak</td></tr>
+    <tr><td>用户数据隔离</td><td><code>data</code> 不进安装包；运行后在 <code>%LOCALAPPDATA%\DeepSeekLocal\data</code> 生成</td></tr>
+    <tr><td>端到端断言</td><td><b>25 通过 / 0 失败</b>（见下）</td></tr>
+  </table>
+  <p class="muted" style="margin-top:-1mm">
+    25 项覆盖：应用在线、全新 0 会话、新建会话、SSE 流式正文、done 事件、会话落盘、自动标题、
+    第二轮上下文、消息累计、设置写回、侧栏列表、上传接口、四个静态资源、思考过程事件、联网工具事件、
+    自动路由事件、上下文装配事件、引用来源、压缩包整理成会话、日历增读。
+  </p>
+  <figure>
+    <img src="../data/shots/50-音视频两段式-标签.png" alt="沙盒里跑出的回答">
+    <figcaption>图 17　沙盒里由假上游驱动跑出的真实界面（用于断言，不消耗真实额度）</figcaption>
+  </figure>
+</section>
+
+<section>
+  <h2>已知限制</h2>
+  <ul>
+    <li><b>QQ 通道的真扫码登录还没端到端验过</b>：需要先在你机器上启动 NapCat 并扫码，接口、二维码刷新、重启出码都已实现并单测过。</li>
+    <li>联网搜索与读链接依赖 DeepSeek 官方工具与你的额度；关掉联网就是纯本地推理。</li>
+    <li>本地压缩摘要默认优先用本机 Ollama，没装或失败会自动回落到 API。</li>
+    <li>Windows 10/11 x64；安装与运行都不需要管理员权限。</li>
+  </ul>
+  <div class="note">
+    数据都在本机：<code>data/conversations/*.json</code>（会话）、<code>data/archive/</code>（压缩前原文）、
+    <code>data/media/</code>（图片与导入附件）、<code>data/settings.json</code>（Key 与偏好）。
+    想完全清空，退出应用后删掉 <code>%LOCALAPPDATA%\DeepSeekLocal\data</code> 即可。
+  </div>
+  <footer>DeepSeek Local 1.0.1　·　本地优先的 DeepSeek 客户端　·　2026-11-22</footer>
+</section>
+
+</body>
+</html>

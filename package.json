@@ -1,0 +1,25 @@
+{
+  "name": "deepseek-app",
+  "version": "1.0.1",
+  "private": true,
+  "type": "module",
+  "description": "DeepSeek 对话（本地版）：App 功能复刻，指向 DeepSeek API",
+  "scripts": {
+    "start": "electron .",
+    "serve": "node server.mjs",
+    "web": "node server.mjs --open",
+    "desktop": "node server.mjs --desktop"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "@electron/packager": "^20.3.0",
+    "electron": "^45.4.1"
+  },
+  "main": "electron/main.cjs",
+  "author": {
+    "name": "local"
+  },
+  "productName": "DeepSeek"
+}
