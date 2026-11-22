@@ -3604,10 +3604,17 @@ async function handleChat(req, res) {
   ctxMeta.tune = { on: !!tune.on, temperature: tune.temperature, base: tune.base, label: tune.label || '', tags: tune.tags || [] };
   if (tune.on && tune.prompt) {
     ctxMeta.tune.applied = true;
-    // 放在开头连续的 system 之后：既在提示词区，又不打乱后面的记忆/检索/原文顺序
+    // 并进开头连续的 system 区里（最后一条），不再单开一条——
+    // 两条 system 接口虽然收，但语义上本就该是同一段提示词。
     let at = 0;
     while (at < ctx.length && ctx[at] && ctx[at].role === 'system') at++;
-    ctx.splice(at, 0, { role: 'system', content: tune.prompt });
+    if (at > 0) {
+      const prev = ctx[at - 1];
+      const base = typeof prev.content === 'string' ? prev.content : '';
+      prev.content = base ? `${base}\n\n${tune.prompt}` : tune.prompt;
+    } else {
+      ctx.splice(0, 0, { role: 'system', content: tune.prompt });
+    }
   }
   if (tune.on) sseSend(res, { type: 'tune', ...ctxMeta.tune });
 
