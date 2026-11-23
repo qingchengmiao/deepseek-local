@@ -462,6 +462,21 @@ pwsh -NoProfile -File tools\_run-fresh.ps1 -Tests qq-test,context-test,route-tes
 - 坑：**别 `taskkill /im QQ.exe`**，那会连用户自己的 QQ 一起杀；宿主的进程判定只认「路径在 Shell 目录下」+「父链传播」，且限定在 `QQ.exe`/`NapCatWinBootMain.exe` 两个名字。
   登录成功后也别随便 kill——QQ 的会话要落盘，强杀可能把登录 profile 写坏，表现是「QQ 起来 20 秒就自己退出」，这时只能把登录目录删掉重扫。
 
+### 「重启 / 刷新二维码」为什么以前会报「没找到启动器」（2026-11-23 修）
+
+隔离实例用的是 `D:\NapCatDSL\Shell` 这份 **Shell 副本**，里面只有 `NapCatWinBootMain.exe` 和 `napcat.mjs`，没有 `扫码登录.bat` / `start-napcat-A.bat`。UI 的「重启 / 刷新二维码」以前还走老 NapCat 的 `.bat` 路径，所以一点就报：
+
+```
+重启失败：没在 D:\NapCatDSL\Shell 里找到启动器（扫码登录.bat / start-napcat-A.bat）
+```
+
+现在（`server.mjs` 的 `isNapcatShellDir` / `isoShellDir` / `startNapcat` / `restartNapcat`）：
+
+- 目录里认到 `NapCatWinBootMain.exe` 或 `napcat.mjs`，就当 Shell 副本 → 交 C++ 宿主拉起（只有它知道要带 `--user-data-dir`，不带的后果是 QQ 快速登录别的号、永远不出码）
+- `restart` **先看实例活没活**：`loggedIn` 或 OneBot 端口通，直接返回 `skipped`「没动它」，一次都不 stop；因为强杀会把登录 profile 写坏，代价是重新扫码（这个坑踩过两次）
+- 真的挂了才 `stop` → 等 1.2 秒 → `start` → 最多等 60 秒看二维码 hash 有没有变，返回 `rebuilt` / `waitedMs` / `killed`
+
+验法：`node tools\napcat-hostpath-test.mjs`（14 项；用假宿主 .mjs 冒充 C++ 宿主，跑在 18931，不碰真实例）。
 ### 长期托管怎么做的（2026-11-23）
 
 - 托管入口：`%LOCALAPPDATA%\DeepSeekLocal\napcat-host\host-run.cmd` → 跑 `DSLNapCatHost.exe run`（前台看门狗）。

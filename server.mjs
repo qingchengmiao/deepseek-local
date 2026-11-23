@@ -838,6 +838,19 @@ function napcatLauncher(dir) {
   return '';
 }
 
+/** 这份目录是不是 NapCat 的 Shell 副本（有 boot main / napcat.mjs，但没有 .bat 启动器） */
+function isNapcatShellDir(dir) {
+  if (!dir || !existsSync(dir)) return false;
+  return existsSync(path.join(dir, 'NapCatWinBootMain.exe')) || existsSync(path.join(dir, 'napcat.mjs'));
+}
+
+/** 隔离实例的 Shell 目录（老 NapCat 目录跟 Shell 副本要分开认） */
+function isoShellDir(settings) {
+  const shell = String(settings.napcatShell || '').trim();
+  if (shell && isNapcatShellDir(shell)) return shell;
+  return '';
+}
+
 /** 找最新的二维码图（NapCat 扫码时会把二维码落成 png） */
 async function findNapcatQr(dir) {
   const hits = [];
@@ -960,13 +973,21 @@ async function napcatStatus(settings) {
   return { dir, exists, launcher, port: base.port, portOpen: open, qr, login };
 }
 
-function startNapcat(settings) {
+async function startNapcat(settings) {
   const dir = settings.qqNapCatDir || DEFAULT_SETTINGS.qqNapCatDir;
   const launcher = napcatLauncher(dir);
-  if (!launcher) throw new Error(`没在 ${dir} 里找到启动器（扫码登录.bat / start-napcat-A.bat）`);
+  // Shell 副本里没有 .bat 启动器，只有 NapCatWinBootMain.exe：交给 C++ 宿主拉起，
+  // 它才知道要带 --user-data-dir（不带的后果是 QQ 快速登录别的号、永远不出码）。
+  const shell = isoShellDir(settings);
+  if (shell && (!launcher || shell === dir)) {
+    const r = await napcatHostRun(settings, 'start');
+    if (!r.ok && Number(r.code) !== 3) throw new Error(r.error || '宿主没把 NapCat 拉起来');
+    return { ok: true, via: 'host', launcher: '(C++ 宿主)', shell, running: !!r.running, already: Number(r.code) === 3 };
+  }
+  if (!launcher) throw new Error(`没在 ${dir} 里找到启动器（扫码登录.bat / start-napcat-A.bat），也不是 Shell 副本（NapCatWinBootMain.exe）`);
   const child = spawn('cmd.exe', ['/c', launcher], { cwd: dir, detached: true, stdio: 'ignore', windowsHide: true });
   child.unref();
-  return { ok: true, launcher };
+  return { ok: true, via: 'bat', launcher };
 }
 
 // 找出占着 OneBot 端口 / 跑在 NapCat 目录里的进程，杀掉（重启 NapCat 才能让它重出二维码）
@@ -1018,11 +1039,47 @@ function killPids(pids) {
 // 手动的「出新的码」：杀掉旧 NapCat → 重跑启动器 → 等目录里出现新二维码（最多 60 秒）
 async function restartNapcat(settings) {
   const dir = settings.qqNapCatDir || DEFAULT_SETTINGS.qqNapCatDir;
+  // Shell 副本：走宿主（stop + start）。已经登录的实例不硬杀——强杀会把登录 profile 写坏，
+  // 代价是要重新扫码，这个坑踩过两次了。
+  const shell = isoShellDir(settings);
+  if (shell && (!napcatLauncher(dir) || shell === dir)) {
+    const before = await napcatHostState(settings).catch(() => null);
+    // 端口通 = 会话活着；这时去 stop 就等于把它杀了，代价是重新扫码。宁可不给码。
+    if (before && (before.loggedIn || before.httpUp)) {
+      return {
+        ok: true, via: 'host', shell,
+        skipped: '实例活着（已登录 / OneBot 端口通），没动它。真要换号，先点「停止」再重新扫码。',
+        rebuilt: false, waitedMs: 0, qr: null,
+        login: before.uid ? { uid: before.uid, nick: before.nick || '' } : null,
+      };
+    }
+    const beforeHash = (before && before.qr && before.qr.hash) || '';
+    const killed = await napcatHostRun(settings, 'stop').then(r => r.killed || []).catch(() => []);
+    await new Promise(r => setTimeout(r, 1200));
+    const t0 = Date.now();
+    const started = await napcatHostRun(settings, 'start');
+    if (!started.ok && Number(started.code) !== 3) throw new Error(started.error || '宿主没把 NapCat 拉起来');
+    let st = before;
+    let rebuilt = false;
+    while (Date.now() - t0 < 60000) {
+      await new Promise(r => setTimeout(r, 1200));
+      st = await napcatHostState(settings).catch(() => null);
+      if (!st) continue;
+      if (st.loggedIn) { rebuilt = false; break; } // 已经登录就不用再等码
+      const hash = (st.qr && st.qr.hash) || '';
+      if (hash && hash !== beforeHash) { rebuilt = true; break; }
+    }
+    const qr = st && st.qr ? { file: st.qr.file, mtime: st.qr.mtime, fresh: st.qr.fresh } : null;
+    return {
+      ok: true, via: 'host', shell, killed, rebuilt, waitedMs: Date.now() - t0, qr,
+      launcher: '(C++ 宿主)',
+    };
+  }
   const before = await findNapcatQr(dir).catch(() => null);
   const pids = await napcatPids(settings);
   const killed = killPids(pids);
   await new Promise(r => setTimeout(r, 1200));
-  const started = startNapcat(settings);
+  const started = await startNapcat(settings);
   const t0 = Date.now();
   const hashOf = async f => {
     if (!f) return '';
@@ -4479,7 +4536,7 @@ async function handleApi(req, res, url) {
 
   if (pathname === '/api/napcat/start' && method === 'POST') {
     try {
-      return sendJson(res, 200, startNapcat(await loadSettings()));
+      return sendJson(res, 200, await startNapcat(await loadSettings()));
     } catch (e) {
       return sendJson(res, 400, { ok: false, error: e.message });
     }
