@@ -12,7 +12,7 @@
 | --- | --- | --- |
 | `DeepSeekLocal-Setup-1.0.2.exe` | 107.14 MB（112340666 字节） | `82e28b81c5b0d4816c6d0710910f182c68aa2f183beb215f5642b92872a7eead` |
 | `DeepSeek-Local-1.0.2-source.zip` | 约 7.1 MB | 见 `SHA256SUMS.txt`（源码包里有 notes，算完才定得下来） |
-| `DeepSeek-Local-1.0.2.bundle` | 4.36 MB（4575021 字节） | `4fb483610f2e2d1f6827bbe872287a7376f2f929feb41ba3d15dea60349686e9` |
+| `DeepSeek-Local-1.0.2.bundle` | 约 4.4 MB | 见 `SHA256SUMS.txt`（bundle 里含这次提交，最后一次生成） |
 
 Windows 10/11 x64。安装包按当前用户安装（`%LOCALAPPDATA%\Programs\DeepSeekLocal`），不需要管理员权限；桌面与开始菜单快捷方式指向原生启动器 `DeepSeekLauncher.exe`。**升级直接覆盖安装即可，`data/` 里的对话与设置不动。**
 
