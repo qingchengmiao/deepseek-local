@@ -6,17 +6,17 @@
 
 ---
 
-## 下载与安装（发布版 v1.0.1）
+## 下载与安装（发布版 v1.0.2）
 
 不想自己编译的话，直接用安装包：
 
 | 文件 | 说明 |
 | --- | --- |
-| `DeepSeekLocal-Setup-1.0.1.exe` | 安装包（约 105 MB，Windows 10/11 x64，中文向导，按当前用户装、不需要管理员） |
-| `DeepSeek-Local-1.0.1-source.zip` | 源码包（不含 `data/`、`dist/`、`node_modules/`，可自行构建） |
+| `DeepSeekLocal-Setup-1.0.2.exe` | 安装包（约 105 MB，Windows 10/11 x64，中文向导，按当前用户装、不需要管理员） |
+| `DeepSeek-Local-1.0.2-source.zip` | 源码包（不含 `data/`、`dist/`、`node_modules/`，可自行构建） |
 | `DeepSeek-Local-功能介绍.pdf` / `DeepSeek-Local-功能演示.pdf` | 图文说明（功能介绍、演示沙盒、摘要模型自动拉取） |
 
-安装：双击 `DeepSeekLocal-Setup-1.0.1.exe` → 一路「下一步」。默认装到 `%LOCALAPPDATA%\Programs\DeepSeekLocal`，桌面和开始菜单生成 **DeepSeek** 快捷方式，指向原生启动器 `DeepSeekLauncher.exe`（托盘、单实例、自动拉起本地服务、内存回收）。
+安装：双击 `DeepSeekLocal-Setup-1.0.2.exe` → 一路「下一步」。默认装到 `%LOCALAPPDATA%\Programs\DeepSeekLocal`，桌面和开始菜单生成 **DeepSeek** 快捷方式，指向原生启动器 `DeepSeekLauncher.exe`（托盘、单实例、自动拉起本地服务、内存回收）。
 
 - 用户数据独立放在 `%LOCALAPPDATA%\DeepSeekLocal\data`（`--data-dir` 可改），升级/重装**不会覆盖**你的对话；卸载也不会删数据。
 - 第一次打开要做两件事：左下角「设置」填 DeepSeek API Key（只存本机 `data/settings.json`）；需要联网/深度思考就在输入框下面的胶囊里打开。
@@ -69,7 +69,7 @@ npm run desktop    # 起服务 + Edge/Chrome 独立窗口（旧的桌面方式�
 $env:ELECTRON_MIRROR = 'https://npmmirror.com/mirrors/electron/'
 node node_modules\@electron\packager\bin\electron-packager.mjs . DeepSeek `
   --platform=win32 --arch=x64 --icon=assets/app.ico --out=dist --overwrite `
-  --app-version=1.0.1 --electron-version=45.4.1 --prune=true --no-asar `
+  --app-version=1.0.2 --electron-version=45.4.1 --prune=true --no-asar `
   --ignore="^/dist" --ignore="^/data" --ignore="^/node_modules"
 ```
 
@@ -615,7 +615,7 @@ pwsh -NoProfile -File tools\_run-fresh.ps1 -Tests qq-test,context-test,route-tes
   ```powershell
   & "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" installer\deepseek-local.iss
   ```
-  产物 `dist/installer/DeepSeekLocal-Setup-1.0.1.exe`（约 105 MB，按当前用户装、免管理员，默认目录 `%LOCALAPPDATA%\Programs\DeepSeekLocal`）。
+  产物 `dist/installer/DeepSeekLocal-Setup-1.0.2.exe`（约 105 MB，按当前用户装、免管理员，默认目录 `%LOCALAPPDATA%\Programs\DeepSeekLocal`）。
 - 打包前记得：`dist/DeepSeek-win32-x64/data` 是指向仓库 `data/` 的 junction（装着你的会话数据），`.iss` 里用 `Excludes: "data,data\*"` 排除它；`dist/DeepSeek-win32-x64/locales` 只留 `en-US/zh-CN/zh-TW.pak` 能省 47 MB。
 - 安装后数据在 `%LOCALAPPDATA%\DeepSeekLocal\data`，第一次启动是空会话列表；卸载**不会**删这个目录（用户数据留着）。
 - 装的时候需要写桌面快捷方式和 `HKCU` 卸载键，必须用你自己的账户在资源管理器里双击安装包；在沙箱化/受限令牌的进程里跑会以 `0x80070005 拒绝访问` 回滚（详见日志 `%TEMP%\*.log`）。

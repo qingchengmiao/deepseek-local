@@ -1,6 +1,6 @@
 {
   "name": "deepseek-app",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "private": true,
   "type": "module",
   "description": "DeepSeek 对话（本地版）：App 功能复刻，指向 DeepSeek API",

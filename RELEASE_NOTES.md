@@ -1,83 +1,67 @@
-# DeepSeek Local v1.0.1
+# DeepSeek Local v1.0.2
 
-发布日期：2026-11-22
+发布日期：2026-11-23
 
 把官方 App 的体验接到你自己的 DeepSeek API 上：界面照官方做，每一句话都由你自己的 Key 发出，对话记录只落在这台机器上。
+
+这一版的主题是 **QQ 通道真正独立**：不再跟 DSH 抢同一个 NapCat 实例、同一个号、同一个端口，并且有人值守——崩了自己回来，起来了会自己修配置。
 
 ## 下载
 
 | 文件 | 体积 | SHA256 |
 | --- | --- | --- |
-| `DeepSeekLocal-Setup-1.0.1.exe` | 105.11 MB（110,219,147 字节） | `748532ee0c80055edbf9e37220372a0c5f8a59dac0fc457ce90e19e114bca73f` |
-| `DeepSeek-Local-1.0.1-source.zip` | 4.40 MB（4,615,824 字节） | `d5b1bb5485d8d4daaddf3f1c7b3fa1c7f0f4a5f31c4ba7d7d011adbc1fe81f45` |
+| `DeepSeekLocal-Setup-1.0.2.exe` | 见 `SHA256SUMS.txt` | 见 `SHA256SUMS.txt` |
+| `DeepSeek-Local-1.0.2-source.zip` | 见 `SHA256SUMS.txt` | 见 `SHA256SUMS.txt` |
+| `DeepSeek-Local-1.0.2.bundle` | 见 `SHA256SUMS.txt` | 见 `SHA256SUMS.txt` |
 
-Windows 10/11 x64。安装包按当前用户安装（`%LOCALAPPDATA%\Programs\DeepSeekLocal`），不需要管理员权限；桌面与开始菜单快捷方式指向原生启动器 `DeepSeekLauncher.exe`。
+Windows 10/11 x64。安装包按当前用户安装（`%LOCALAPPDATA%\Programs\DeepSeekLocal`），不需要管理员权限；桌面与开始菜单快捷方式指向原生启动器 `DeepSeekLauncher.exe`。**升级直接覆盖安装即可，`data/` 里的对话与设置不动。**
 
 ## 这一版改了什么
 
-**1. 拖入文件自识别 + 导入独立页**
+**1. QQ 通道独立实例（C++ 宿主 + Shell 副本）**
 
-- 底栏新增「导入」整页：文件拖进来先**辨认**（DeepSeek 官方导出包 / 对话 JSON 整包 / 任意资料压缩包 / 单个文本），告诉你属于哪一类、准备生成几个会话，你点「开始导入」才落库。
-- 对话页拖入 = 加到这条消息（图片、PDF、Word、文本、音视频），不再误触发导入；拖 `.zip` 会提示并转到导入页。
-- 限制：单包 ≤ 200 MB、文本类最多 60 个文件、单文件取前 6000 字、单会话累计 4 万字；二进制不会硬塞给模型。
+以前 DSH 的 qq-bridge 写死 `http://127.0.0.1:3000`，应用这边也打 3000，两边抢同一个 NapCat、同一个 QQ 号，消息随时被另一头取走。现在：
 
-**2. 摘要模型自动拉取（国内镜像优先）**
+- 应用自带一份 Shell 副本（默认 `D:\NapCatDSL\Shell`，从 `D:\NapCatOneKey\NapCat.52230.Shell` 复制，原目录原样保留当备份），自己的号、自己的端口：OneBot `3200/3201`、WebUI `6209`
+- `napcat/host.cpp` 编译成 `DSLNapCatHost.exe`（255 KB，纯 Win32 API，无第三方 DLL），命令 `status|start|stop|run|qr`，只有 `run` 是常驻看门狗
+- 关键一步：`NapCatWinBootMain.exe` 会把多余参数转给 `QQ.exe`，所以宿主给它带 `--user-data-dir=<登录目录>`。不带的后果是 QQ 读系统共享的 `%APPDATA%\QQ`，一启动就快速登录原来那个号，**永远不弹二维码**
+- QQ 页顶部新增「隔离实例（C++ 宿主）」卡片：启动 / 停止 / 刷新状态 / 看二维码 / 保存目录，对应 `GET /api/napcat/host`、`POST /api/napcat/host/start|stop`
 
-- 本机 ollama 在线但没有可用小模型时自动拉：先试官方源 `qwen2.5:1.5b-instruct`（失败退 `0.5b`），不行依次换魔搭 ModelScope、hf-mirror.com 下 GGUF → 生成 Modelfile → `ollama create`。
-- 进度、来源、日志在设置页与 `GET /api/context/model-pull` 可见；同一模型只拉一次；全部失败会明确报错并退回 API，不阻塞对话。
+**2. 长期托管：掉了自己回来**
 
-**3. 演示沙盒**
+- 计划任务 `DeepSeekLocal_NapCatHost`（登录时触发、延迟 30 秒、`ExecutionTimeLimit=0`、`MultipleInstances=IgnoreNew`）
+- 入口是 `%LOCALAPPDATA%\DeepSeekLocal\napcat-host\host-run.vbs`，用 `WScript.Shell.Run(cmd, 0, True)` 循环跑宿主，**全程没有黑框**
+- 退避 3→6→12→24→48→60 秒，连续失败 ≥6 次退到 10 分钟一轮；连续失败 ≥3 次把「连续起不来几次了」写进状态文件，≥6 次直接给出诊断：「可能是登录态被写坏（QQ 起来就退出），删掉登录目录后重新扫码」
+- 宿主 `wmain` 一进来就把自己的控制台窗口隐藏，`NapCatWinBootMain.exe` 是 CUI、继承这个隐藏控制台，所以双击、计划任务、点按钮都不会闪窗
 
-- `启动演示.cmd` 起一个**独立实例**（`demo-data\` + 端口 8899）：不读你的 Key、没有真实对话，内含三条演示会话，可重复生成不翻倍。`停止演示.cmd` 收掉。
+**3. 自动纠错 + 消息推送**
 
-**4. 交互细节**
+- 每 90 秒一轮自检：OneBot 配置缺了/端口不对就按模板重写并重启；连续失败 ≥4 次判定登录态坏了，把登录目录改名成 `login-broken-<时间>` 再建空目录、置 `needLogin`；在线时什么都不动
+- `POST /api/napcat/heal` 可手动跑一次，`GET /api/napcat/heal` 看轮次与动作，日志 `data/napcat-heal.log`
+- 推送：设置 → QQ 页「消息推送」卡，`POST /api/push`；关掉「允许主动推送」之后接口一律 **403**；推给谁按 body.uid → `pushUid` → `qqUid` 回落
 
-- 悬停提示改为自绘圆角气泡（不再有系统直角方块，300ms 延迟，深浅色各一套）。
-- 输入框内部蓝色焦点框隐形，只保留整块输入区的一层淡光晕。
-- 选中正文自动浮出「复制」小条；右键菜单换成中文「剪切 / 复制 / 粘贴 / 全选」，按可用状态灰显——都不需要按 Ctrl+C/V。
-- 二维码卡片会说这张码多旧；「重启 NapCat 出新码」可真正逼出新码。
-- QQ 通道可选「回话用哪个会话」，换绑即接着该会话的历史继续说。
-- 混合模式（Flash 出大纲 → Pro 写正文）修复了 `latest_reminder` 两条上游约束导致的 400。
+**4. 回复风格三档**
 
-**5. 稳定性**
+设置里选「回复风格」：活人感（默认）/ 原生 / 自定义。活人感会额外注入一小段提示（先给判断、说具体数字、别段末总结、允许改口），但用户要清单、步骤、表格、代码时照给。实测同一句话，原生是四段加粗清单，活人感是一句判断加两个具体价格再反问。
 
-- Electron 侧四处自愈：启动失败退避重试、失败页自带重试并每 3 秒自动重试、渲染进程崩溃自动重载、5 秒探活看门狗在服务恢复后自动恢复界面。
-- 启动器修复「服务已在跑却不把窗口拉出来」；端口被占时自动顺延扫描。
+**5. 「重启 / 刷新二维码」不再报「没找到启动器」**
 
-**6. 文档**
+隔离实例的 Shell 副本里没有 `.bat` 启动器，只有 `NapCatWinBootMain.exe`。UI 的重启现在认这种情况交给宿主拉起；而且**实例活着（已登录 / 端口通）时一次 stop 都不做**，只回一句「没动它」——强杀会写坏登录 profile，代价是重新扫码。
 
-- `README.md` 增「下载与安装」「演示沙盒」「摘要模型自动拉取」等节。
-- `docs/DeepSeek-Local-功能介绍.pdf`（11 页）与 `docs/DeepSeek-Local-功能演示.pdf`。
+**6. 自适应临时设定并进同一条 system**
 
-## 发布前自测（隔离实例，无真实 Key）
+以前自适应调温那段「这一轮的临时设定」是单独一条 system，等于每次请求两条 system。现在并进开头那段 system 的末尾（开头没有 system 时才新建）。带工具、带风格一次请求也只有一条。
 
-| 套件 | 结果 |
-| --- | --- |
-| smoke | 51 / 0 |
-| integration | 54 / 0 |
-| context-test | 96 / 1 |
-| dom-check | 114 / 0 |
-| dom-chat | 30 / 0 |
-| test-md | 39 / 0 |
-| calendar-test | 48 / 0 |
-| media-smoke | 23 / 0 |
-| qq-test / qq-bind-test | 35 / 0、15 / 0 |
-| model-fallback-test / model-pull-test | 15 / 0、13 / 0 |
-| zip-import-test / import-preview-test / import-page-test | 24 / 0、27 / 0、15 / 0 |
-| selection-copy-test / hover-tip-test | 12 / 0、13 / 0 |
-| napcat-restart-test / qr-refresh-test | 全部通过 |
-| lint-frontend / check-assets | 通过 |
+## 自测
 
-`context-test` 的 1 项失败是**测试自身的路径假设**：它在脚本里写死了仓库 `data/` 去读归档 JSON，而本次跑的是隔离实例（`data\\_relchk`），归档写在别处——同一段其余断言（条数、分段、引擎、时间）全绿，产品侧无异常。
+- 全量回归 **790 通过 / 0 失败**：qq 35、context 97、route 49、tune 19、link 36、import-page 15、smoke 51、integration 54、calendar 48、media 23、model-fallback 15、model-pull 13、zip 25、import-preview 27、qq-bind 15、dom-check 114、dom-chat 30、dom-drop 16、hover-tip 13、chat-drop 11、selection-copy 12、app-check 12、lint 11、check-assets 10、test-md 39
+- 本轮新增：`reply-style-test` 16 项、`napcat-hostpath-test` 14 项（用假宿主验「Shell 副本走宿主 / 活着跳过 / 挂了才重启」三条路）
+- 真机：delta（`3810187208`）扫码登录、3200/3201/6209 全通、`/api/qq/send` 发消息返回 `message_id`；推送接口实测 `messageId 177342083`
 
 ## 已知限制
 
-- **QQ 的真扫码登录没在我这端到端验过**：需要你先启动 NapCat 并扫码。接口、二维码刷新、重启出新码都已实现并单测过。
-- 联网搜索与读链接依赖 DeepSeek 官方工具与你的额度；关掉联网就是纯本地推理。
-- 本地压缩摘要优先用本机 Ollama，没装/失败会自动回落到 API。
-- 演示沙盒里不配 Key，只演示界面与本地能力，不发真实请求。
-- 镜像下载地址取决于当天网络与仓库结构；拉不到会明确报 `官方源和国内镜像都没拉成（检查网络或手动 ollama pull）`。
-
-## 数据在哪
-
-`%LOCALAPPDATA%\DeepSeekLocal\data\`：`conversations/*.json`（会话）、`archive/`（压缩前原文）、`media/`（图片与导入附件）、`settings.json`（Key 与偏好）。升级/重装不覆盖，卸载不删；想彻底清空就退出应用后删掉这个目录。
+- QQ 的聊天数据根还在 `Documents\Tencent Files\<号>`，`--user-data-dir` 只管 Chromium profile 那一层。要连数据一起搬，得再改 QQ 的数据根，这一版没做
+- 同一个号在别处登录会把这边踢下线（`[KickedOffLine]`），重新扫码即可
+- 装好的实例不读 `PORT` 环境变量（主进程只在 8787 起扫端口），想换端口请从设置里改或同时只留一个实例
+- 联网/深度思考依赖官方工具与你的额度；本机摘要模型拉不动时会回落 API
+- QQ 真扫码这条链在 CI 里没法自动化，只能人工验；本版是人工验过的
