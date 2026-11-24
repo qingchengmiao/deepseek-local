@@ -15,6 +15,8 @@ const S = {
   abort: null,
   searchHits: null,
   renderCount: 80,
+  convTotal: 0,     // 这个会话一共有多少条（本地可能只拉了尾巴）
+  convFrom: 0,      // 本地数组第一条在全会话里的下标
   theme: 'auto',
   modalOpen: false,
   attachments: [],     // 待发送的附件
@@ -246,8 +248,11 @@ async function openConversation(id, opts = {}) {
   if (!id) return;
   if (S.streaming) stopGeneration(true);
   try {
-    const data = await api('/api/conversations/' + id);
+    // 大会话只拉尾巴：整包 9MB 的 JSON 光是 parse 就会把界面冻住
+    const data = await api('/api/conversations/' + id + (opts.full ? '' : '?tail=80'));
     S.conv = data.conversation;
+    S.convTotal = typeof data.totalMessages === 'number' ? data.totalMessages : S.conv.messages.length;
+    S.convFrom = typeof data.from === 'number' ? data.from : 0;
     S.renderCount = opts.full ? Math.max(80, S.conv.messages.length) : 80;
     if (!location.hash.endsWith('/' + id)) history.replaceState(null, '', '#c/' + id);
     renderMessages();
@@ -272,6 +277,9 @@ async function newConversation() {
   S.conversations = data.conversations;
   renderSidebar();
   S.conv = data.conversation;
+  S.convTotal = S.conv.messages.length;
+  S.convFrom = 0;
+  S.renderCount = 80;
   history.replaceState(null, '', '#c/' + S.conv.id);
   renderMessages();
   updateTopbar();
@@ -736,6 +744,7 @@ function renderMessages() {
   if (!S.conv) return;
   const total = S.conv.messages.length;
   const from = Math.max(0, total - S.renderCount);
+  const moreBefore = (S.convFrom || 0) > 0;
   const wrap = $('#messages');
   const scroller = $('#scroller');
   const prevHeight = scroller.scrollHeight;
@@ -745,15 +754,16 @@ function renderMessages() {
   if (total === 0) w.classList.remove('hidden');
   else w.classList.add('hidden');
   const frag = document.createDocumentFragment();
-  if (from > 0) {
+  if (from > 0 || moreBefore) {
     const btn = document.createElement('button');
     btn.className = 'load-more';
-    btn.textContent = `载入更早的 ${Math.min(from, 60)} 条（共 ${total} 条）`;
+    const meTotal = S.convTotal || total + (S.convFrom || 0);
+    btn.textContent = `载入更早的 ${Math.min(moreBefore ? (S.convFrom || 0) : from, 60)} 条（共 ${meTotal} 条）`;
     btn.addEventListener('click', () => {
-      S.renderCount += 60;
       const anchor = { h: scroller.scrollHeight, t: scroller.scrollTop };
-      renderMessages();
-      scroller.scrollTop = anchor.t + (scroller.scrollHeight - anchor.h);
+      const done = () => { renderMessages(); scroller.scrollTop = anchor.t + (scroller.scrollHeight - anchor.h); };
+      if (moreBefore) loadEarlier().then(done);
+      else { S.renderCount += 60; done(); }
     });
     frag.appendChild(btn);
   }
@@ -765,6 +775,23 @@ function renderMessages() {
   if (from === 0 && S.renderCount <= 80 && prevTop === 0) scrollToBottom(true);
   else scroller.scrollTop = prevTop;
   updateTopbar();
+}
+
+/** 往前翻一页：找服务端把 [convFrom-60, convFrom) 拿下来，接在本地数组前面 */
+async function loadEarlier() {
+  if (!S.conv || !(S.convFrom > 0)) return;
+  const count = Math.min(60, S.convFrom);
+  try {
+    const data = await api(`/api/conversations/${S.conv.id}/messages?before=${S.convFrom}&count=${count}`);
+    const got = data.messages || [];
+    if (!got.length) { S.convFrom = 0; return; }
+    S.conv.messages = got.concat(S.conv.messages);
+    S.convFrom = typeof data.from === 'number' ? data.from : Math.max(0, S.convFrom - got.length);
+    S.renderCount += got.length;
+  } catch (e) {
+    toast('载入更早的消息失败：' + e.message);
+    S.convFrom = 0;
+  }
 }
 
 function markLastActions() {
@@ -808,7 +835,7 @@ function updateTopbar() {
     return;
   }
   title.textContent = S.conv.title || '新对话';
-  const n = S.conv.messages.length;
+  const n = S.convTotal || S.conv.messages.length;
   meta.textContent = n ? `${n} 条消息` : '';
 }
 
@@ -979,6 +1006,7 @@ async function sendMessage({ mode = 'send', content = '', messageId = null } = {
       ...(pending.length ? { attachments: pending.map(a => ({ ...a, uploading: false })) } : {}),
     };
     S.conv.messages.push(optimistic);
+    S.convTotal = (S.convTotal || S.conv.messages.length) + 2;
     wrap.appendChild(messageEl(optimistic));
     $('#input').value = '';
     S.attachments = [];
@@ -1251,7 +1279,7 @@ async function sendMessage({ mode = 'send', content = '', messageId = null } = {
       try {
         let data = null;
         for (let i = 0; i < 6; i++) {
-          data = await api('/api/conversations/' + conv.id);
+          data = await api('/api/conversations/' + conv.id + '?tail=80');
           const msgs = data.conversation.messages;
           const last = msgs[msgs.length - 1];
           const saved = !st.content || (last && last.role === 'assistant' && String(last.content || '').length >= st.content.length);
@@ -1261,6 +1289,9 @@ async function sendMessage({ mode = 'send', content = '', messageId = null } = {
         if (data) {
           const keep = $('#scroller').scrollTop;
           S.conv = data.conversation;
+          S.convTotal = typeof data.totalMessages === 'number' ? data.totalMessages : S.conv.messages.length;
+          S.convFrom = typeof data.from === 'number' ? data.from : 0;
+          S.renderCount = Math.max(80, S.conv.messages.length);
           renderMessages();
           $('#scroller').scrollTop = keep;
         }

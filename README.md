@@ -728,3 +728,48 @@ node tools/backfill-qq-images.mjs <会话id> --apply  # 真写
 - 接口：`GET /api/learn/me` 看摘要、`POST /api/learn/me/refresh` 重算。
 - 口径：只收 `role === 'user'` 的消息；QQ 消息进库时套的「【来自 QQ 上的对方（uid），时间】」抬头和「【这条回在手机上】…」尾巴会先剥掉再量，不然量出来的是我们自己的提示词。
 - 测试：`node tools/user-learn-test.mjs`（53 项）、`node tools/voice-style-test.mjs`（含 meInject 端到端 7 项）、`node tools/shot-learn-me.mjs`（拍学习页顶部那块）。
+
+## 性能与卡死（2026-11-25 加）
+
+### 卡死：以前所有对话共用一把锁
+
+`/api/chat` 原来走 `withLock('chat', ...)` —— 全局一把锁，一个人问长问题，后面所有人的请求（包括 QQ 回话）全排在队伍里等。一条卡住的流就能让整台机器看起来「死了」。
+
+现在按会话排队：`withLock('chat:' + conversationId, ...)`。同一会话仍然串行（消息顺序不乱），不同会话互不阻塞。
+
+另外两处兜底：
+- 流式回压：`sseSend()` 之后看 `res.writableNeedDrain`，积压就 `await` 等 `drain`，慢客户端不会把几十 MB 的缓冲堆在内存里。
+- 后台压缩不再挡路：每轮原来要 `await compactMemory()`（会调一次模型，本机小模型没起时更慢），现在丢给 `queueMemoryJob()` 在 1.5 秒后后台跑，正在流式输出时自动让路；失败只写一行日志，不影响这轮对话。`ctxAsyncCompact: false` 可以退回同步。
+
+### 首字：三次「每轮重算」的缓存
+
+1. `context.mjs` 的 `estimateMessageTokens` 加 WeakMap 缓存（签名 = 正文长度 / 思考长度 / 附件数），3000+ 条消息的估算 122ms → 54ms。
+2. `context.mjs` 的 `getCachedIndex` 原来 key 里带 `conv.updatedAt`，等于每发一条就把几千条重建一遍 BM25 索引；改成「长度差不到 8 条就复用」，重建频率从每轮降到十几轮一次。
+3. `server.mjs` 的 `readArchiveIndex` 按 `index.json` 的 mtime 缓存（冷读 291ms → 热读 5ms）。
+
+### 大会话：只拉尾巴
+
+一个 9.2MB、3300 条的会话，整包发给前端光 `JSON.parse` 就能把界面冻住。现在：
+
+- `GET /api/conversations/<id>?tail=80` 只给最后 80 条 + `totalMessages` + `from`；
+- `GET /api/conversations/<id>/messages?before=<from>&count=60` 往前翻页，「载入更早的 N 条」按钮走这条；
+- 前端 `S.convTotal` / `S.convFrom` 记住「一共多少条 / 本地数组从第几条开始」，顶栏条数显示总数。
+
+实测（3322 条会话）：首屏传输 9.6MB → 84KB，服务端 190ms → 72ms，页面点开→首条消息出现 400ms；往前翻一页 60 条 39ms。
+
+### 怎么看自己慢在哪
+
+每次问答都会往 `data/perf.jsonl` 追加一行：`bodyMs / convMs / buildMs / preFetchMs / connectMs / firstTokenMs / totalMs`，还有 `bms`（`mem / rag / archive / prompts / hot` 各段耗时）和 `payloadBytes`（发给上游的请求体大小）。
+
+超时的请求会额外打一行 `perf-slow`，阈值用环境变量调：`DSAPP_PERF_SLOW_MS=8000`。
+
+实测大会话（改前 → 改后，暖态）：`buildMs` 7212 → 64-66ms，`firstTokenMs` 7583 → 520-750ms，`totalMs` 8680 → 790-1075ms。冷启动第一轮仍有一次索引重建（`buildMs` 约 670ms），之后都是暖的。
+
+### 量法
+
+```powershell
+node tools/perf-chat.mjs "http://127.0.0.1:8787" "deepseek-flash" 3 "c_perfbig1"
+node tools/shot-bigconv.mjs "http://127.0.0.1:8787" "c_perfbig1"
+```
+
+第一个跑三轮问答并打印每一段耗时（第 5 个参数给了会话 id 就不删会话），第二个用 CDP 打开大会话、量首屏并点一次「载入更早」。

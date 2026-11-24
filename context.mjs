@@ -53,9 +53,16 @@ export function estimateTokens(text) {
   return Math.ceil(cjk * 1.05 + other / 3.6);
 }
 
+// 一条消息的 token 估算会被反复问到（热区边界、预算、压缩判断每轮都要走几千条），
+// 正文没变就直接用上次的数。用 WeakMap：消息对象被回收，缓存跟着走。
+const tokCache = new WeakMap();
+
 /** 一条消息的 token 估算：正文 + 思考（打折，因为不回传上游）+ 附件/媒体（按张数估） */
 export function estimateMessageTokens(m) {
   if (!m) return 0;
+  const sig = `${typeof m.content === 'string' ? m.content.length : 0}|${m.reasoning ? m.reasoning.length : 0}|${(m.attachments || []).length}`;
+  const hit = tokCache.get(m);
+  if (hit && hit.sig === sig) return hit.t;
   let t = estimateTokens(m.content);
   if (m.reasoning) t += Math.ceil(estimateTokens(m.reasoning) * 0.15);
   for (const a of m.attachments || []) {
@@ -63,6 +70,7 @@ export function estimateMessageTokens(m) {
     else if (a.kind === 'video' || a.kind === 'audio') t += 800 * (Array.isArray(a.frames) ? a.frames.length : 0) + estimateTokens(a.text);
     else t += 3000;
   }
+  tokCache.set(m, { sig, t });
   return t;
 }
 
@@ -359,12 +367,14 @@ export function keywordsFromMessages(texts, max = 8) {
 const cache = new Map(); // convId -> { key, index }
 
 export function getCachedIndex(conv, messages) {
-  const key = `${messages.length}:${conv.updatedAt || 0}`;
+  // 以前 key 里带 conv.updatedAt，等于每发一条消息就要把几千条重建一遍索引（300ms+）。
+  // 改成「长度差不到 8 条就复用」：热区边界挪几条不影响检索，重建频率从每轮降到十几轮一次。
+  const len = messages.length;
   const hit = cache.get(conv.id);
-  if (hit && hit.key === key) return hit.index;
+  if (hit && Math.abs(len - hit.len) < 8) return hit.index;
   const chunks = chunkMessages(messages);
   const index = buildIndex(chunks);
-  cache.set(conv.id, { key, index });
+  cache.set(conv.id, { len, index });
   if (cache.size > 64) cache.delete(cache.keys().next().value);
   return index;
 }

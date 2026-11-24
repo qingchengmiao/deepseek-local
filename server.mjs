@@ -2197,6 +2197,20 @@ function log(...args) {
   console.log(new Date().toLocaleTimeString('zh-CN', { hour12: false }), ...args);
 }
 
+// 每一轮对话的分段耗时，落 data/perf.jsonl（只在超过阈值时写，别把磁盘写满）
+const PERF_FILE = path.join(DATA, 'perf.jsonl');
+const PERF_SLOW_MS = Number(process.env.DSAPP_PERF_SLOW_MS) || 0;
+function perfLog(obj) {
+  if (!obj) return;
+  const total = Number(obj.totalMs) || 0;
+  const build = Number(obj.buildMs) || 0;
+  if (PERF_SLOW_MS && total < PERF_SLOW_MS && build < PERF_SLOW_MS) return; // 设了阈值就只记慢的
+  try {
+    const line = JSON.stringify({ at: new Date().toISOString(), ...obj });
+    fsp.appendFile(PERF_FILE, line + '\n').catch(() => null);
+  } catch { /* 记不了就算了，不能拖累对话 */ }
+}
+
 function sendJson(res, status, obj) {
   const body = JSON.stringify(obj);
   res.writeHead(status, {
@@ -2260,6 +2274,16 @@ function sseHead(res) {
 function sseSend(res, obj) {
   if (res.writableEnded) return false;
   try { res.write(`data: ${JSON.stringify(obj)}\n\n`); return true; } catch { return false; }
+}
+
+/** 下游缓冲积起来了就等它排空：客户端渲染慢/网络慢时，否则全部堆在内存里，堆到几十 MB 就是「卡死」 */
+function sseDrain(res) {
+  if (res.writableEnded || !res.writableNeedDrain) return null;
+  return new Promise((resolve) => {
+    const done = () => { res.off('drain', done); res.off('close', done); resolve(); };
+    res.on('drain', done);
+    res.on('close', done);
+  });
 }
 
 function sseEnd(res) {
@@ -3134,10 +3158,21 @@ function archiveDirOf(convId) {
   return path.join(ARCHIVE_DIR, String(convId));
 }
 
+// 归档索引按 mtime 缓存：以前每轮都重新读一遍 JSON，冷读能到 300ms
+const archiveIdxCache = new Map(); // convId -> { mtimeMs, idx }
 async function readArchiveIndex(convId) {
-  const j = await readJsonFile(path.join(archiveDirOf(convId), 'index.json'), null);
-  if (!j || !Array.isArray(j.entries)) return { version: 1, convId, entries: [], chunks: [], embedModel: '' };
-  return { version: 1, convId, chunks: [], embedModel: '', ...j };
+  const file = path.join(archiveDirOf(convId), 'index.json');
+  let mtimeMs = 0;
+  try { mtimeMs = (await fsp.stat(file)).mtimeMs; } catch { return { version: 1, convId, entries: [], chunks: [], embedModel: '' }; }
+  const hit = archiveIdxCache.get(convId);
+  if (hit && hit.mtimeMs === mtimeMs) return hit.idx;
+  const j = await readJsonFile(file, null);
+  const idx = (!j || !Array.isArray(j.entries))
+    ? { version: 1, convId, entries: [], chunks: [], embedModel: '' }
+    : { version: 1, convId, chunks: [], embedModel: '', ...j };
+  archiveIdxCache.set(convId, { mtimeMs, idx });
+  if (archiveIdxCache.size > 32) archiveIdxCache.delete(archiveIdxCache.keys().next().value);
+  return idx;
 }
 
 async function writeArchiveIndex(convId, idx) {
@@ -3631,11 +3666,103 @@ function adaptiveTune(settings, { history = [], tokens = 0, attachments = [] } =
 }
 
 /**
+ * 记忆维护的计划：算热区边界、满了多少级、要不要压。
+ * 算法和 buildMessages 里那段保持一致（那边按同一份参数就地算），
+ * 这里单独抽出来是给「后台压缩任务」用——它得自己重新算一遍，不能拿上一轮的索引。
+ */
+function memoryPlan(conv, settings) {
+  const budget = clampNum(settings.ctxBudget, 4000, CTX_BUDGET_MAX, CTX_DEFAULTS.ctxBudget);
+  const hotRatio = clampNum(settings.ctxHotRatio, 0.2, 0.95, CTX_DEFAULTS.ctxHotRatio);
+  let history = conv.messages.filter(m => (m.role === 'user' || m.role === 'assistant'));
+  const maxHist = Number(settings.maxHistoryMessages) || 0;
+  if (maxHist > 0 && history.length > maxHist) {
+    history = history.slice(-maxHist);
+    while (history.length && history[0].role !== 'user') history.shift();
+  }
+  const total = history.length;
+  const hotTarget = budget * hotRatio;
+  let acc = 0;
+  let hotFrom = total;
+  for (let i = total - 1; i >= 0; i--) {
+    const t = estimateMessageTokens(history[i]);
+    if (acc + t > hotTarget && total - i >= 2) break;
+    acc += t;
+    hotFrom = i;
+  }
+  while (hotFrom < total && history[hotFrom].role !== 'user') hotFrom++;
+  const memory = conv.memory && Number.isInteger(conv.memory.upTo) ? conv.memory : null;
+  const stepRatio = clampNum(settings.ctxStepRatio, 0.1, 0.9, CTX_DEFAULTS.ctxStepRatio);
+  const forgetRatio = clampNum(settings.ctxForgetRatio, 0.2, 0.95, CTX_DEFAULTS.ctxForgetRatio);
+  const allTokens = estimateMessagesTokens(history);
+  const hotTokens = estimateMessagesTokens(history.slice(hotFrom));
+  const headTokens = hotFrom > 0 && memory ? estimateMessagesTokens(history.slice(0, memory.upTo + 1)) : 0;
+  const rawRatio = budget > 0 ? allTokens / budget : 0;
+  return {
+    history,
+    hotFrom,
+    memory,
+    oldTokens: Math.max(0, allTokens - hotTokens - headTokens),
+    rawRatio,
+    stepIdx: Math.floor(rawRatio / stepRatio + 1e-9),
+    forgetIdx: Math.floor(rawRatio / forgetRatio + 1e-9),
+    minCompress: clampNum(settings.ctxMinCompress, 200, 100000, CTX_DEFAULTS.ctxMinCompress),
+  };
+}
+
+// 后台压缩：同一会话同一时间只排一个，跑之前确认这条会话此刻没有在流式回答
+const memJobs = new Map();
+function queueMemoryJob(convId) {
+  if (!convId || memJobs.has(convId)) return false;
+  memJobs.set(convId, Date.now());
+  const run = async () => {
+    try {
+      if (locks.has(`chat:${convId}`)) return; // 还有人在对话，等下一轮再说
+      const settings = await loadSettings();
+      if (settings.ctxCompress === false) return;
+      const conv = await loadConversation(convId);
+      if (!conv) return;
+      const plan = memoryPlan(conv, settings);
+      if (plan.hotFrom <= 0) return;
+      if (plan.stepIdx > Number(plan.memory?.step || 0) && plan.oldTokens > 0) {
+        const r = await compactMemory(conv, settings, plan.history, plan.hotFrom, {
+          level: 1,
+          step: plan.stepIdx,
+          rawRatio: plan.rawRatio,
+          force: plan.oldTokens < plan.minCompress && plan.stepIdx - Number(plan.memory?.step || 0) >= 2,
+        });
+        if (r.ok && r.memory) log(`后台压缩：${convId} 压到第 ${plan.stepIdx} 段`);
+      }
+      // 压完重新读一遍再判断要不要合并长期记忆
+      const fresh = await loadConversation(convId);
+      if (!fresh) return;
+      const plan2 = memoryPlan(fresh, settings);
+      if (plan2.forgetIdx > Number(plan2.memory?.forgetStep || 0) && Array.isArray(plan2.memory?.records) && plan2.memory.records.length) {
+        await consolidateMemory(fresh, settings, plan2.history, {
+          rawRatio: plan2.rawRatio,
+          forgetStep: plan2.forgetIdx,
+          upto: plan2.hotFrom,
+        });
+      }
+    } catch (e) {
+      log('后台压缩失败（不影响对话）：', e.message);
+    } finally {
+      memJobs.delete(convId);
+    }
+  };
+  const t = setTimeout(run, 1500);
+  if (t.unref) t.unref();
+  return true;
+}
+
+/**
  * 历史消息 → API messages。
  * 装配顺序：系统提示 → 记忆摘要 → 检索到的旧片段 → 最近原文（越老越按时间降权裁剪）
  * 返回 { messages, meta }，meta 给前端显示预算占用/记忆/召回，也进 SSE 的 context 事件。
  */
 async function buildMessages(conv, settings, { withTools = false } = {}) {
+  const bms = {};
+  let bmPrev = Date.now();
+  const bmMark = (name) => { const now = Date.now(); bms[name] = now - bmPrev; bmPrev = now; };
   const budget = clampNum(settings.ctxBudget, 4000, CTX_BUDGET_MAX, CTX_DEFAULTS.ctxBudget);
   const hotRatio = clampNum(settings.ctxHotRatio, 0.2, 0.95, CTX_DEFAULTS.ctxHotRatio);
   const halfLife = clampNum(settings.ctxHalfLifeDays, 0.5, 3650, CTX_DEFAULTS.ctxHalfLifeDays);
@@ -3689,29 +3816,39 @@ async function buildMessages(conv, settings, { withTools = false } = {}) {
     const minCompress = clampNum(settings.ctxMinCompress, 200, 100000, CTX_DEFAULTS.ctxMinCompress);
     // 第一级：占用每涨一个 step（默认 33%）就把新露出来的老消息压成一条概要，记进 records
     if (settings.ctxCompress && stepIdx > Number(memory?.step || 0) && oldTokens > 0) {
-      const r = await compactMemory(conv, settings, history, hotFrom, {
-        level: 1,
-        step: stepIdx,
-        rawRatio,
-        force: oldTokens < minCompress && stepIdx - Number(memory?.step || 0) >= 2,
-      });
-      if (r.ok && r.memory) {
-        memory = r.memory;
-        for (const w of r.warnings || []) meta.warnings.push(w);
-      } else if (!r.skipped) {
-        meta.warnings.push(r.error === 'NO_KEY'
-          ? '自动压缩已开启，但本机没有可用的小模型、也没填 API Key：写不了摘要，超出预算的老消息会直接丢掉'
-          : `自动压缩失败：${r.error}`);
+      // 压缩要调一次模型（本机小模型或 API）：放在这一轮里会把首字拖到几秒后，
+      // 所以默认改成后台任务——这一轮先用旧记忆，压好下一轮自然就用上了
+      if (settings.ctxAsyncCompact !== false) {
+        if (queueMemoryJob(conv.id)) meta.memoryPending = true;
+      } else {
+        const r = await compactMemory(conv, settings, history, hotFrom, {
+          level: 1,
+          step: stepIdx,
+          rawRatio,
+          force: oldTokens < minCompress && stepIdx - Number(memory?.step || 0) >= 2,
+        });
+        if (r.ok && r.memory) {
+          memory = r.memory;
+          for (const w of r.warnings || []) meta.warnings.push(w);
+        } else if (!r.skipped) {
+          meta.warnings.push(r.error === 'NO_KEY'
+            ? '自动压缩已开启，但本机没有可用的小模型、也没填 API Key：写不了摘要，超出预算的老消息会直接丢掉'
+            : `自动压缩失败：${r.error}`);
+        }
       }
     }
     // 第二级：占用到 forgetRatio（默认 50%）起，按时间权重把分段记忆合并成长期记忆，老段转为「遗忘」
     if (settings.ctxCompress && forgetIdx > Number(memory?.forgetStep || 0) && Array.isArray(memory?.records) && memory.records.length) {
-      const r = await consolidateMemory(conv, settings, history, { rawRatio, forgetStep: forgetIdx, upto: hotFrom });
-      if (r.ok && r.memory) {
-        memory = r.memory;
-        for (const w of r.warnings || []) meta.warnings.push(w);
-      } else if (!r.skipped) {
-        meta.warnings.push(`记忆概括失败：${r.error}`);
+      if (settings.ctxAsyncCompact !== false) {
+        if (queueMemoryJob(conv.id)) meta.memoryPending = true;
+      } else {
+        const r = await consolidateMemory(conv, settings, history, { rawRatio, forgetStep: forgetIdx, upto: hotFrom });
+        if (r.ok && r.memory) {
+          memory = r.memory;
+          for (const w of r.warnings || []) meta.warnings.push(w);
+        } else if (!r.skipped) {
+          meta.warnings.push(`记忆概括失败：${r.error}`);
+        }
       }
     }
     if (!memory || memory.upTo < hotFrom - 1) {
@@ -3725,6 +3862,7 @@ async function buildMessages(conv, settings, { withTools = false } = {}) {
   meta.step = Number(memory?.step || 0);
   meta.forgetStep = Number(memory?.forgetStep || 0);
   meta.rawRatio = Math.round(rawRatio * 1000) / 1000;
+  bmMark('mem');
 
   // ---- 向量检索：从热区之前的老消息里捞相关片段
   let ragHits = [];
@@ -3746,6 +3884,7 @@ async function buildMessages(conv, settings, { withTools = false } = {}) {
     }
   }
 
+  bmMark('rag');
   // ---- 归档检索：压缩掉的原文另存了 JSON，也能被搜回来
   if (settings.ctxRag && settings.ctxArchive && topK > 0 && q.trim()) {
     try {
@@ -3830,6 +3969,7 @@ async function buildMessages(conv, settings, { withTools = false } = {}) {
   if (style) meta.style = style;
 
   // 技能包：跟在系统提示词后面，单独一条，别和活人感混成一大段
+  bmMark('archive');
   const skillText = skillsPrompt(settings);
   if (skillText) {
     out.push({ role: 'system', content: skillText });
@@ -3942,6 +4082,10 @@ async function buildMessages(conv, settings, { withTools = false } = {}) {
     });
   }
 
+  bmMark('prompts');
+  const tHot = Date.now();
+  let attImages = 0;
+  let attBytes = 0;
   for (let i = hotFrom; i < total; i++) {
     const m = history[i];
     const age = messageAgeDays(conv, m, i, total);
@@ -3963,6 +4107,11 @@ async function buildMessages(conv, settings, { withTools = false } = {}) {
           continue;
         }
         const block = await attachmentPayload(att, withTools);
+        if (att.kind === 'image' && block && block.type === 'image_url') {
+          attImages++;
+          const u = String(block.image_url?.url || '');
+          attBytes += u.length;
+        }
         if (block) parts.push(block);
       }
       if (parts.length) {
@@ -3976,6 +4125,11 @@ async function buildMessages(conv, settings, { withTools = false } = {}) {
 
   meta.hotFrom = hotFrom;
   meta.hotMessages = total - hotFrom;
+  meta.hotMs = Date.now() - tHot;
+  bms.hot = meta.hotMs;
+  meta.bms = bms;
+  meta.attImages = attImages;
+  meta.attBytes = attBytes;
   meta.tokens = out.reduce((n, m) => n + (typeof m.content === 'string' ? estimateTokens(m.content) : 0), 0);
   return { messages: out, meta };
 }
@@ -4069,12 +4223,15 @@ async function contextStatus(conv, settings) {
   };
 }
 
-async function handleChat(req, res) {
-  const body = await readBody(req);
+async function handleChat(req, res, presetBody) {
+  const chatT0 = Date.now();
+  const body = presetBody || await readBody(req);
   if (!body || typeof body !== 'object') return sendJson(res, 400, { error: '缺少请求体' });
+  const tBody = Date.now();
 
   const conv = await loadConversation(body.conversationId);
   if (!conv) return sendJson(res, 404, { error: '会话不存在' });
+  const tConv = Date.now();
 
   const settings = await loadSettings();
   const apiKey = (body.apiKey || settings.apiKey || '').trim();
@@ -4277,6 +4434,7 @@ async function handleChat(req, res) {
   // 每个会话可以有自己的上下文参数（conv.ctx 覆盖全局 settings）
   const ctxSettings = ctxSettingsFor(conv, settings);
   const built = await buildMessages(conv, ctxSettings, { withTools });
+  const tBuilt = Date.now();
   let ctx = built.messages;
   const ctxMeta = built.meta;
   if (!Array.isArray(ctxMeta.warnings)) ctxMeta.warnings = [];
@@ -4289,6 +4447,11 @@ async function handleChat(req, res) {
   const tune = adaptiveTune(ctxSettings, {
     history: conv.messages,
     tokens: Number(ctxMeta.tokens) || 0,
+    hotMs: Number(ctxMeta.hotMs) || 0,
+    bms: ctxMeta.bms || null,
+    attImages: Number(ctxMeta.attImages) || 0,
+    attBytes: Number(ctxMeta.attBytes) || 0,
+    memPending: !!ctxMeta.memoryPending,
     attachments: lastMsgAtts,
   });
   ctxMeta.tune = { on: !!tune.on, temperature: tune.temperature, base: tune.base, label: tune.label || '', tags: tune.tags || [] };
@@ -4444,6 +4607,8 @@ async function handleChat(req, res) {
   const { chat, betaChat } = apiEndpoints(settings.baseUrl);
   const endpoint = mode === 'continue' ? betaChat : chat;
 
+  var payloadJson = JSON.stringify(payload);
+  var payloadBytes = Buffer.byteLength(payloadJson);
   let upstream;
   try {
     upstream = await fetch(endpoint, {
@@ -4453,9 +4618,10 @@ async function handleChat(req, res) {
         Authorization: `Bearer ${apiKey}`,
         Accept: 'text/event-stream',
       },
-      body: JSON.stringify(payload),
+      body: payloadJson,
       signal: ac.signal,
     });
+    var tConnected = Date.now(); // 上游回响应头的时刻（= 首字节前的网络等待）
   } catch (e) {
     await saveConversation(conv); // 用户消息留着，方便重试
     // fetch failed 本身没有信息量：把底层 cause（DNS / 连接重置 / 超时）一起带出来
@@ -4485,6 +4651,7 @@ async function handleChat(req, res) {
   let usage = null;
   let reasoningText = '';
   let contentText = '';
+  let firstTokenAt = 0; // 第一个正文分片到达的时刻（首字延迟）
   let finishReason = null;
   let upstreamError = null;
   let annotations = [];
@@ -4544,6 +4711,7 @@ async function handleChat(req, res) {
           if (!dup) {
             reasoningText += piece;
             sseSend(res, { type: 'reasoning', text: piece });
+            { const w = sseDrain(res); if (w) await w; }
           }
         }
         if (d.content) {
@@ -4554,7 +4722,9 @@ async function handleChat(req, res) {
           }
           if (piece) {
             contentText += piece;
+            if (!firstTokenAt) firstTokenAt = Date.now();
             sseSend(res, { type: 'content', text: piece });
+            { const w = sseDrain(res); if (w) await w; }
           }
         }
         // 最后一个 chunk 一次性带全量工具调用、引用与标题
@@ -4626,6 +4796,31 @@ async function handleChat(req, res) {
     context: ctxMeta,
   });
   sseEnd(res);
+  perfLog({
+    conv: conv.id,
+    model,
+    route: route ? route.kind : '',
+    twoStage,
+    msgs: conv.messages.length,
+    ctxMsgs: Array.isArray(ctx) ? ctx.length : 0,
+    ctxChars: Number(ctxMeta.chars) || 0,
+    tokens: Number(ctxMeta.tokens) || 0,
+    hotMs: Number(ctxMeta.hotMs) || 0,
+    bms: ctxMeta.bms || null,
+    attImages: Number(ctxMeta.attImages) || 0,
+    attBytes: Number(ctxMeta.attBytes) || 0,
+    memPending: !!ctxMeta.memoryPending,
+    links: linkPages.filter(p => p.ok).length,
+    bodyMs: tBody - chatT0,
+    convMs: tConv - tBody,
+    payloadBytes: Number(payloadBytes) || 0,
+    buildMs: tBuilt - tConv,
+    preFetchMs: tConnected ? tConnected - tBuilt : 0,
+    connectMs: tConnected ? tConnected - chatT0 : 0,
+    firstTokenMs: firstTokenAt ? firstTokenAt - chatT0 : 0,
+    totalMs: Date.now() - chatT0,
+    chars: fullContent.length,
+  });
 }
 
 function wantedUrl(text) {
@@ -5496,7 +5691,33 @@ async function handleApi(req, res, url) {
     const conv = await loadConversation(id);
     if (!conv) return sendJson(res, 404, { error: '会话不存在' });
 
-    if (!rest && method === 'GET') return sendJson(res, 200, { conversation: conv });
+    // 大会话别整包甩给前端：一个 9MB 的 JSON，光 JSON.parse 就能把界面冻住几百毫秒。
+    // 默认只发尾巴（?tail=N），更早的用下面 /messages 按需取。
+    if (!rest && method === 'GET') {
+      const q = new URL(req.url, 'http://127.0.0.1');
+      const total = conv.messages.length;
+      const wantTail = Math.floor(Number(q.searchParams.get('tail')) || 0);
+      if (wantTail > 0 && wantTail < total) {
+        const tail = Math.max(10, wantTail);
+        const from = Math.max(0, total - tail);
+        return sendJson(res, 200, {
+          conversation: { ...conv, messages: conv.messages.slice(from) },
+          totalMessages: total,
+          from,
+        });
+      }
+      return sendJson(res, 200, { conversation: conv, totalMessages: total, from: 0 });
+    }
+    // 往前翻页：拿 [before-count, before) 这一段
+    if (rest === 'messages' && method === 'GET') {
+      const q = new URL(req.url, 'http://127.0.0.1');
+      const total = conv.messages.length;
+      const count = Math.min(200, Math.max(1, Math.floor(Number(q.searchParams.get('count')) || 60)));
+      const beforeRaw = q.searchParams.get('before');
+      const end = beforeRaw === null ? total : Math.max(0, Math.min(total, Math.floor(Number(beforeRaw) || 0)));
+      const from = Math.max(0, end - count);
+      return sendJson(res, 200, { messages: conv.messages.slice(from, end), from, total });
+    }
     if (!rest && method === 'PATCH') {
       const body = await readBody(req) || {};
       if (typeof body.title === 'string') conv.title = body.title.trim().slice(0, 80) || conv.title;
@@ -5723,7 +5944,12 @@ async function handleApi(req, res, url) {
   }
 
   if (pathname === '/api/chat' && method === 'POST') {
-    return withLock('chat', () => handleChat(req, res));
+    // 按会话排队：同一个会话里的两轮仍然串行（避免消息顺序乱），
+    // 但不同会话、以及 QQ 回话不再被一条长回答堵住（以前是一把全局 chat 锁，会卡死）
+    const body = await readBody(req);
+    if (!body || typeof body !== 'object') return sendJson(res, 400, { error: '缺少请求体' });
+    const key = `chat:${body.conversationId || 'new'}`;
+    return withLock(key, () => handleChat(req, res, body));
   }
 
   if (pathname === '/api/import' && method === 'POST') return handleImport(req, res);
