@@ -818,3 +818,23 @@ node tools/shot-bigconv.mjs "http://127.0.0.1:8787" "c_perfbig1"
 - 保存后 toast 会回显实际生效值（「已保存到这个会话：预算 20.0 万」/「预算跟随全局」），不用再开一次面板确认。
 - 服务端本来就支持任意合法预算（`normalizeCtxOverrides` 里 `ctxBudget` 夹到 4000–1000000 的整数），这次没改服务端，只把 UI 的入口和回填修对了。
 - 验证脚本（临时，已删）：CDP 探针在 `c_mEslcTXCJoga` 上设 `200000` + 热区 `0.5` → 服务端 `conv.ctx` 落库、重开面板仍显示覆盖值；「恢复跟随全局」→ `conv.ctx` 被删、面板回到全局值。
+
+## 记忆预设（2026-11-25 加）
+
+- 四档预设，一整套参数一起换：
+
+  | id | 名字 | 预算 | 热区 | 召回 | 半衰期 | 压缩 | 检索 | 原文归档 |
+  | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+  | `lean` | 轻量 | 64000 | 0.5 | 2 | 14 天 | 开 | 关 | 关 |
+  | `std` | 标准 | 128000 | 0.45 | 4 | 30 天 | 开 | 开 | 关 |
+  | `long` | 长对话 | 256000 | 0.35 | 6 | 30 天 | 开 | 开 | 开 |
+  | `deep` | 深记忆 | 512000 | 0.3 | 8 | 90 天 | 开 | 开 | 开 |
+
+- **只存 id，不存数字**：`settings.ctxPreset`（全局）和 `conv.ctxPreset`（单个会话）里都只有一个 id，参数在 `server.mjs` 的 `CTX_PRESETS` 里。所以以后改预设定义，所有跟着它的会话**下一次请求就自动按新参数算** —— 这就是「改一次、全都同步」，不用逐个会话重设。
+- 叠加顺序（`ctxSettingsFor`）：全局单项设置 → 全局预设 → 会话预设 → 会话手工覆盖（`conv.ctx` 最硬）。所以「套了预设又在面板里手改了某几项」，手改的那几项赢。
+- 面板：「上下文与记忆」里最上面一行芯片（跟随全局 / 轻量 / 标准 / 长对话 / 深记忆），点一下立刻生效并重开面板，toast 报生效预算。选「跟随全局」= 连手工覆盖一起撤。
+- 设置页：「记忆预设（全局）」一行芯片（不用预设 / 四档），点一下所有没自己选过的会话都跟着变。
+- 为什么用芯片不用下拉：原生 `<select>` 在 Electron 的 modal 里弹层点击不可靠（用户报的「下拉窗口中调整会失败」就是它），所以调参入口一律改成芯片 + 数字输入框。
+- 接口：`GET /api/ctx-presets?conversationId=<id>`（预设表 + 全局/会话当前档 + `effective`）、`POST /api/ctx-presets/apply`（`{presetId, conversationId?}`；给 conversationId 就改会话并清掉 `conv.ctx` 手工覆盖，不给就改全局）、`PATCH /api/conversations/<id> {ctxPreset}`（`''` 或非法 id 会清掉）。`GET /api/conversations/<id>/context` 的生效预算在**顶层 `budget`**，`ctx` 里放 `followGlobal / overrides / preset / globalPreset`。
+- 测试：`cd deepseek-app; node tools/ctx-preset-test.mjs`（29 项，走隔离实例 18961 + `DSAPP_DATA` 临时目录，上游地址故意填不通的 `127.0.0.1:1` —— 这个测试不发模型请求）。
+- 截图：`node tools/shot-preset.mjs`（会话面板 `data/shots/112-面板-记忆预设.png`、设置页 `data/shots/113-设置-全局记忆预设.png`）。

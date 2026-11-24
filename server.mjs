@@ -579,6 +579,7 @@ const DEFAULT_SETTINGS = {
   // ---- 用户对话学习：从「我自己说过的话」里量说话样子（网页打的字 + QQ 发来的消息）
   meInject: false, // 打开后，每条请求会带上「对方平时怎么说话」的画像
   meMax: 400, // 画像注入的字数上限
+  ctxPreset: '', // 全局用哪套记忆预设（lean/std/long/deep，'' = 不套预设、用下面的单项设置）
   selfTune: true, // 打开后，模型可以在回答里带一个调整块，自己改温度/说话口径（可撤回）
 };
 
@@ -651,14 +652,56 @@ function normalizeCtxOverrides(raw) {
   return out;
 }
 
+// 记忆预设：一整套上下文参数打包，会话/全局只记「用哪个预设」（记 id 不记数字），
+// 所以以后改预设的定义，所有跟着它的会话下一次请求就自动同步了 —— 不用一个个去改。
+const CTX_PRESETS = [
+  {
+    id: 'lean',
+    name: '轻量',
+    desc: '省 token、看得近：64k 预算、只召 2 条、不检索旧片段',
+    ctx: { ctxBudget: 64000, ctxHotRatio: 0.5, ctxTopK: 2, ctxHalfLifeDays: 14, ctxCompress: true, ctxRag: false, ctxArchive: false },
+  },
+  {
+    id: 'std',
+    name: '标准',
+    desc: '日常够用：128k 预算、召 4 条、开检索',
+    ctx: { ctxBudget: 128000, ctxHotRatio: 0.45, ctxTopK: 4, ctxHalfLifeDays: 30, ctxCompress: true, ctxRag: true, ctxArchive: false },
+  },
+  {
+    id: 'long',
+    name: '长对话',
+    desc: '上下文给足：256k 预算、召 6 条、原文归档',
+    ctx: { ctxBudget: 256000, ctxHotRatio: 0.35, ctxTopK: 6, ctxHalfLifeDays: 30, ctxCompress: true, ctxRag: true, ctxArchive: true },
+  },
+  {
+    id: 'deep',
+    name: '深记忆',
+    desc: '尽量别忘：512k 预算、召 8 条、半衰期 90 天、原文归档',
+    ctx: { ctxBudget: 512000, ctxHotRatio: 0.3, ctxTopK: 8, ctxHalfLifeDays: 90, ctxCompress: true, ctxRag: true, ctxArchive: true },
+  },
+];
+const CTX_PRESET_IDS = new Set(CTX_PRESETS.map((p) => p.id));
+function ctxPresetOf(id) {
+  return CTX_PRESETS.find((p) => p.id === id) || null;
+}
+
 function ctxOverridesOf(conv) {
   return normalizeCtxOverrides(conv && conv.ctx);
 }
 
-/** 生效参数 = 全局 settings 被 conv.ctx 覆盖 */
+/**
+ * 生效参数 = 全局 settings ← 全局预设 ← 会话预设 ← 会话手动覆盖（后者压前者）。
+ * 预设只存 id：改预设定义，所有跟它的会话自动跟着变。
+ */
 function ctxSettingsFor(conv, settings) {
+  const out = { ...settings };
+  const gp = ctxPresetOf(settings && settings.ctxPreset);
+  if (gp) Object.assign(out, gp.ctx);
+  const cp = ctxPresetOf(conv && conv.ctxPreset);
+  if (cp) Object.assign(out, cp.ctx);
   const ov = ctxOverridesOf(conv);
-  return Object.keys(ov).length ? { ...settings, ...ov } : settings;
+  if (Object.keys(ov).length) Object.assign(out, ov);
+  return out;
 }
 
 const uid = (prefix = 'm') => prefix + '_' + crypto.randomBytes(9).toString('base64url');
@@ -858,6 +901,7 @@ async function saveSettings(patch) {
     else if (k === 'learnLastSettledWeek') next.learnLastSettledWeek = String(v || '').slice(0, 20);
     else if (k === 'meInject') next.meInject = v === true;
     else if (k === 'meMax') next.meMax = Math.max(100, Math.min(2000, Math.floor(Number(v) || 400)));
+    else if (k === 'ctxPreset') next.ctxPreset = CTX_PRESET_IDS.has(String(v || '')) ? String(v) : '';
     else if (k === 'selfTune') next.selfTune = v !== false;
     else if (typeof v === 'boolean') next[k] = v;
     else next[k] = v;
@@ -4468,6 +4512,8 @@ async function contextStatus(conv, settings) {
       followGlobal: !Object.keys(ctxOverridesOf(conv)).length,
       overrides: ctxOverridesOf(conv),
       budgetMax: CTX_BUDGET_MAX,
+      preset: conv.ctxPreset || '',
+      globalPreset: settings.ctxPreset || '',
     },
   };
 }
@@ -5642,6 +5688,63 @@ async function handleApi(req, res, url) {
     return sendJson(res, 200, { ok: true, ...selfTune.summary() });
   }
 
+  // ---------------- 记忆预设：一整套上下文参数，会话/全局只记「用哪个」
+  if (pathname === '/api/ctx-presets' && method === 'GET') {
+    const settings = await loadSettings();
+    const cid = url.searchParams.get('conversationId') || '';
+    const conv = cid ? await loadConversation(cid) : null;
+    return sendJson(res, 200, {
+      presets: CTX_PRESETS,
+      global: settings.ctxPreset || '',
+      conversation: (conv && conv.ctxPreset) || '',
+      conversationId: cid || '',
+      // 这个会话实际生效的值（预设 + 覆盖都算进去），面板拿来显示「现在是什么」
+      effective: conv ? {
+        ctxBudget: ctxSettingsFor(conv, settings).ctxBudget,
+        ctxHotRatio: ctxSettingsFor(conv, settings).ctxHotRatio,
+        ctxTopK: ctxSettingsFor(conv, settings).ctxTopK,
+        ctxHalfLifeDays: ctxSettingsFor(conv, settings).ctxHalfLifeDays,
+      } : null,
+    });
+  }
+  if (pathname === '/api/ctx-presets/apply' && method === 'POST') {
+    let body = null;
+    try {
+      body = await readBody(req);
+    } catch (e) {
+      return sendJson(res, 400, { error: e.message });
+    }
+    if (!body || typeof body !== 'object') return sendJson(res, 400, { error: '缺少请求体' });
+    const pid = String(body.presetId || '').trim();
+    if (pid && !CTX_PRESET_IDS.has(pid)) return sendJson(res, 400, { error: '没有这个预设' });
+    const cid = String(body.conversationId || '').trim();
+    if (cid) {
+      const conv = await loadConversation(cid);
+      if (!conv) return sendJson(res, 404, { error: '会话不存在' });
+      if (pid) {
+        conv.ctxPreset = pid;
+        delete conv.ctx; // 套预设就把手工单项覆盖清掉，否则预设改不动这几项
+      } else {
+        delete conv.ctxPreset;
+        delete conv.ctx; // 「跟随全局」= 连手工覆盖也撤掉
+      }
+      await saveConversation(conv);
+      const stNow = await loadSettings();
+      const eff = ctxSettingsFor(conv, stNow);
+      log(`记忆预设：会话 ${conv.title || cid} → ${pid || '跟随全局'}`);
+      return sendJson(res, 200, {
+        ok: true,
+        conversation: summarize(conv),
+        preset: conv.ctxPreset || '',
+        global: stNow.ctxPreset || '',
+        effective: { ctxBudget: eff.ctxBudget, ctxHotRatio: eff.ctxHotRatio, ctxTopK: eff.ctxTopK, ctxHalfLifeDays: eff.ctxHalfLifeDays },
+      });
+    }
+    await saveSettings({ ctxPreset: pid });
+    log(`记忆预设：全局 → ${pid || '不套预设'}`);
+    return sendJson(res, 200, { ok: true, global: pid });
+  }
+
   // ---------------- 技能包（skills/<id>/SKILL.md）
   if (pathname === '/api/skills' && method === 'GET') {
     const settings = await loadSettings();
@@ -6049,6 +6152,12 @@ stopQQBridge();
         const v = body.replyStyle.trim();
         if (['native', 'human', 'qq', 'custom'].includes(v)) conv.replyStyle = v;
         else delete conv.replyStyle;
+      }
+      // 每个会话跟哪个记忆预设：'' = 跟随全局预设
+      if ('ctxPreset' in body) {
+        const pid = String(body.ctxPreset || '').trim();
+        if (pid && CTX_PRESET_IDS.has(pid)) conv.ctxPreset = pid;
+        else delete conv.ctxPreset;
       }
       // 每个会话自己的上下文参数：传 {} 或 null = 全部改回跟随全局
       if ('ctx' in body) {

@@ -1680,6 +1680,11 @@ async function openSettings() {
   };
   const stNow = () => (st.temp == null ? '没定（跟设置里的温度走）' : `模型定的 ${Number(st.temp)}`);
 
+  // 记忆预设：全局那一套（其实只有 id，参数在服务端，所以改了定义所有会话自动跟着变）
+  let preG = { presets: [], global: '' };
+  try { preG = { ...preG, ...(await api('/api/ctx-presets')) }; } catch {}
+  const preGName = (id) => { const p = (preG.presets || []).find((x) => x.id === id); return p ? p.name : ''; };
+
   const { body, close } = pageShell('设置', 'Key 只保存在本机 data/settings.json，不会上传到任何地方。', `
     <div class="settings-top">
       <button class="btn" id="setImport" title="支持 DeepSeek 导出包 / JSON 整包 / 任意资料压缩包">导入对话或压缩包</button>
@@ -1967,6 +1972,16 @@ async function openSettings() {
         <div class="desc">存到 data/archive/&lt;会话&gt;/&lt;起始-结束&gt;.json，摘要丢了细节还能翻原文，也进检索索引</div>
       </div>
       <input type="checkbox" id="setCtxArchive" ${fresh.ctxArchive ? 'checked' : ''}>
+    </div>
+
+    <div class="field">
+      <label>记忆预设（全局）</label>
+      <div class="ctx-presets">
+        ${[['', '不用预设'], ...(preG.presets || []).map((p) => [p.id, p.name])].map(([id, name]) =>
+          `<button class="chip${String(preG.global || '') === id ? ' on' : ''}" data-gpreset="${esc(id)}"
+                   title="${esc(id ? ((preG.presets.find((p) => p.id === id) || {}).desc || '') : '下面每一项各自生效')}">${esc(name)}</button>`).join('')}
+      </div>
+      <div class="tip">一整套参数一起换：预算、热区比例、召回条数、半衰期、压缩、检索、原文归档。选了预设，下面那些单项就不再单独算了（想改单项就选「不用预设」）；单个会话还能在它的「上下文与记忆」面板里另选一套。</div>
     </div>
 
     <div class="field">
@@ -2360,6 +2375,18 @@ async function openSettings() {
   paintSave();
 
   body.addEventListener('click', async e => {
+    const gpc = e.target.closest('[data-gpreset]');
+    if (gpc) {
+      const pid = gpc.dataset.gpreset || '';
+      const nm = pid ? (preGName(pid) || pid) : '不用预设';
+      gpc.disabled = true;
+      try {
+        await api('/api/ctx-presets/apply', { method: 'POST', body: { presetId: pid } });
+        toast(pid ? `全局换成「${nm}」：跟着全局的会话都按这套算` : '全局不套预设了，下面每一项各自生效', 5000);
+        await openSettings();
+      } catch (err) { gpc.disabled = false; toast('换全局预设失败：' + err.message, 6000); }
+      return;
+    }
     const x = e.target.closest('[data-x]');
     if (!x) return;
     if (x.dataset.x === 'cancel') return close();
@@ -2462,6 +2489,12 @@ async function openContextPanel() {
     return toast('读不到上下文状态：' + e.message);
   }
   S.ctxStatus = st;
+  // 记忆预设：一整套参数，选一次就全包了（比一个个调下拉可靠）
+  let pre = { presets: [], global: '', conversation: '' };
+  try {
+    pre = await api('/api/ctx-presets?conversationId=' + encodeURIComponent(S.conv.id));
+  } catch {}
+  const preDesc = id => (pre.presets.find(p => p.id === id) || {}).desc || '';
   const rawPct = Math.round((st.historyTokens / Math.max(1, st.budget)) * 100);
   const pct = Math.max(0, Math.min(100, rawPct));
   const mem = st.memory;
@@ -2512,10 +2545,36 @@ async function openContextPanel() {
     </div>
 
     <div class="field">
-      <label>本会话上下文参数${st.ctx && !st.ctx.followGlobal ? '（这个会话单独设了）' : '（现在跟随全局）'}</label>
+      <label>记忆预设</label>
+      <div class="ctx-presets">
+        ${[['', '跟随全局'], ...pre.presets.map(p => [p.id, p.name])].map(([id, name]) =>
+          `<button class="chip ctx-preset${String(pre.conversation || '') === id ? ' on' : ''}" data-preset="${esc(id)}"
+                   title="${esc(id ? preDesc(id) : '不套预设，用全局那套单项设置')}">${esc(name)}</button>`).join('')}
+      </div>
+      <div class="tip">${(() => {
+        const named = id => (pre.presets.find(p => p.id === id) || {}).name || id;
+        if (pre.conversation) return `本会话在用「${esc(named(pre.conversation))}」这套参数。点别的就整组换掉，点「跟随全局」回到全局那套。`;
+        if (pre.global) return `本会话跟着全局的「${esc(named(pre.global))}」。想单独一套就点上面别的。`;
+        return '现在没套预设，下面每一项各自生效。想一整套换，点上面任意一档。';
+      })()}</div>
+    </div>
+
+    <div class="field">
+      <label>本会话上下文参数${(() => {
+        const pn = id => (pre.presets.find(p => p.id === id) || {}).name || id;
+        if (st.ctx && !st.ctx.followGlobal) return pre.conversation ? `（单独设过，另套着「${esc(pn(pre.conversation))}」）` : '（这个会话单独设了）';
+        if (pre.conversation) return `（这套是预设「${esc(pn(pre.conversation))}」）`;
+        return '（现在跟随全局）';
+      })()}</label>
       <div class="row">
         <input id="ctxLocalBudget" type="number" min="4000" max="${st.ctx?.budgetMax || 1000000}" step="1000"
-               placeholder="跟随全局（${fmtNum(st.budget)}）" spellcheck="false" style="flex:1"
+               placeholder="${(() => {
+                 const pn = id => (pre.presets.find(p => p.id === id) || {}).name || id;
+                 const effB = pre.effective && pre.effective.ctxBudget;
+                 if (pre.conversation) return `预设「${pn(pre.conversation)}」：${fmtNum(effB || st.budget)}`;
+                 if (pre.global) return `跟全局「${pn(pre.global)}」：${fmtNum(effB || st.budget)}`;
+                 return `跟随全局（${fmtNum(st.budget)}）`;
+               })()}" spellcheck="false" style="flex:1"
                list="ctxBudgetPresets">
         <datalist id="ctxBudgetPresets">
           ${[24000, 64000, 128000, 256000, 512000, st.ctx?.budgetMax || 1000000].map(v => `<option value="${v}"></option>`).join('')}
@@ -2558,7 +2617,13 @@ async function openContextPanel() {
   const ovl = (st.ctx && st.ctx.overrides) || {};
   // 以前这里一律回填全局值：会话自己设过热区/召回/半衰期的话，一重开面板就显示成全局值，
   // 点保存又把它写回全局值 —— 看着就像「单独设了没用」。所以每个字段都按 覆盖值 ?? 全局值 回填。
-  const eff = k => (ovl[k] !== undefined && ovl[k] !== null ? ovl[k] : st.settings[k]);
+  // 优先级：会话手工覆盖 > 预设带的 > 全局单项设置
+  const effNow = (pre && pre.effective) || {};
+  const eff = k => {
+    if (ovl[k] !== undefined && ovl[k] !== null) return ovl[k];
+    if (effNow[k] !== undefined && effNow[k] !== null) return effNow[k];
+    return st.settings[k];
+  };
   const fillNum = (sel, v) => { const el = body.querySelector(sel); if (el) el.value = String(v); };
   fillNum('#ctxLocalBudget', ovl.ctxBudget !== undefined && ovl.ctxBudget !== null ? ovl.ctxBudget : '');
   fillNum('#ctxLocalHot', eff('ctxHotRatio'));
@@ -2611,6 +2676,25 @@ async function openContextPanel() {
         box.innerHTML = `<div class="tip err">展开失败：${esc(err.message)}</div>`;
       } finally {
         act0.disabled = false;
+      }
+      return;
+    }
+    // 记忆预设芯片：点一下整组换掉，不用再动下面那些单项控件
+    const pchip = e.target.closest('[data-preset]');
+    if (pchip) {
+      const pid = pchip.dataset.preset || '';
+      const nm = pid ? ((pre.presets.find(p => p.id === pid) || {}).name || pid) : '跟随全局';
+      pchip.disabled = true;
+      try {
+        const r = await api('/api/ctx-presets/apply', { method: 'POST', body: { presetId: pid, conversationId: S.conv.id } });
+        const effBudget = (r && r.effective && r.effective.ctxBudget) || st.budget;
+        toast(pid ? `这个会话换成「${nm}」：预算 ${fmtNum(effBudget)}` : '这个会话回到跟随全局（手工覆盖也撤了）', 5000);
+        close();
+        await refreshCtxBadge();
+        openContextPanel();
+      } catch (err) {
+        pchip.disabled = false;
+        toast('换预设失败：' + err.message, 6000);
       }
       return;
     }
