@@ -637,6 +637,19 @@ function usageHTML(m) {
   return parts.length ? `<span class="msg-time">${parts.join(' · ')}</span>` : '';
 }
 
+/**
+ * QQ 会话里的用户消息被服务端包了两层：抬头「【来自 QQ 上的对方（uid），时间】」和
+ * 尾巴上的手机打字口径。存着是对的（模型要读），但气泡里没必要显示 →
+ * 抬头折成一行小字，口径直接不显示。
+ */
+function splitQqWrap(text) {
+  const raw = String(text || '');
+  const body = raw.replace(/\n*【这条回在手机上】[^\n]*/g, '').replace(/\s+$/, '');
+  const hit = body.match(/^【来自 QQ 上的对方（([^）]*)），([^】]*)】\n*/);
+  if (!hit) return { meta: '', body };
+  return { meta: `${hit[1].trim()} · ${hit[2].trim()}`, body: body.slice(hit[0].length) };
+}
+
 function messageEl(m) {
   const el = document.createElement('div');
   el.className = 'msg ' + m.role;
@@ -646,9 +659,16 @@ function messageEl(m) {
     const bubble = document.createElement('div');
     bubble.className = 'bubble';
     bubble.insertAdjacentHTML('beforeend', attachmentsHTML(m));
+    const { meta: qqMeta, body: shown } = splitQqWrap(m.content);
+    if (qqMeta) {
+      const from = document.createElement('div');
+      from.className = 'qq-from';
+      from.textContent = 'QQ · ' + qqMeta;
+      bubble.appendChild(from);
+    }
     const md = document.createElement('div');
     md.className = 'md';
-    md.innerHTML = MD.render(m.content || '');
+    md.innerHTML = MD.render(shown);
     bubble.appendChild(md);
     const actions = document.createElement('div');
     actions.className = 'msg-actions';
@@ -2987,6 +3007,20 @@ function bindEvents() {
   });
 
   $('#settingsBtn').addEventListener('click', openSettings);
+  document.querySelectorAll('[data-open-settings]').forEach(b => b.addEventListener('click', openSettings));
+
+  // 左下角：一行图标，点箭头展开成带名字的（记在 localStorage，下次还这样）
+  const foot = $('#sideFoot');
+  const footMore = $('#footMore');
+  const setFootOpen = (open) => {
+    foot.classList.toggle('expanded', open);
+    footMore.setAttribute('aria-expanded', open ? 'true' : 'false');
+    footMore.title = open ? '收起（只留图标）' : '展开（显示名字）';
+    try { localStorage.setItem('dsh.sideFootExpanded', open ? '1' : '0'); } catch {}
+  };
+  try { if (localStorage.getItem('dsh.sideFootExpanded') === '1') setFootOpen(true); } catch {}
+  footMore.addEventListener('click', () => setFootOpen(!foot.classList.contains('expanded')));
+
   $('#clockBtn').addEventListener('click', openDayPage);
   $('#qqNavBtn').addEventListener('click', openQqPage);
   $('#pluginsBtn').addEventListener('click', openPluginsPage);
