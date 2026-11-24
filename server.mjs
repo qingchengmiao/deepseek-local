@@ -1034,8 +1034,9 @@ async function chatOnce(conv, text, settings, { attachments = [] } = {}) {
   const built = await buildMessages(conv, ctxSettings, { withTools: false });
   let model = normalizeModel(conv.model || settings.model || 'deepseek-flash');
   if (model === 'auto') {
-    // 带图就只能走能看图的模型（V4.1 Flash）；纯文本还是按路由里的聊天模型
-    const hasImage = attachments.some(a => a && a.kind === 'image');
+    // 带图就只能走能看图的模型（V4.1 Flash）；老对话里存过图也算
+    const hasImage = attachments.some(a => a && a.kind === 'image')
+      || conv.messages.some(m => Array.isArray(m.attachments) && m.attachments.some(x => x && x.kind === 'image'));
     model = hasImage
       ? normalizeModel(settings.routeThinkModel || 'deepseek-flash')
       : normalizeModel(settings.routeChatModel || 'deepseek-v4-pro');
@@ -4089,6 +4090,16 @@ async function handleChat(req, res) {
     thinking = route.thinking;
   }
   if (!MODELS.some(m => m.id === model)) model = 'deepseek-flash';
+  // 对话里存着的图也算附件：看不见的模型会答「我没有读图能力」，所以这段对话有图就走能看图的
+  const historyHasImage = conv.messages.some(m => Array.isArray(m.attachments) && m.attachments.some(a => a && a.kind === 'image'));
+  if (historyHasImage) {
+    const cur = MODELS.find(m => m.id === model);
+    if (cur && cur.vision === false) {
+      const vm = normalizeModel(settings.routeThinkModel || 'deepseek-flash');
+      if (route) { route.kind = 'vision'; route.model = vm; route.reason = '这段对话里有图，只有 V4.1 Flash 能看'; }
+      model = vm;
+    }
+  }
   const readLinkOn = mode !== 'continue' && !!(body.readLink === undefined ? settings.readLink : body.readLink)
     && wantedUrl(lastUser?.content);
 

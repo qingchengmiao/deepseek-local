@@ -612,6 +612,14 @@ pwsh -NoProfile -File tools\_run-fresh.ps1 -Tests qq-test,context-test,route-tes
 - 「只发不回」模式也照样挂附件，界面上能看到图。
 
 验法：`node tools/qq-image-test.mjs`（假 OneBot 发一张 16×16 PNG，18 项：附件落地、`GET /api/uploads` 能取回、发给上游的请求里真有 `image_url` 的 base64 块、模型是 flash、纯文字消息不带图）。
+**修复之前收的图怎么补**：那批消息只留了 `[图片]` 文本，文件从来没下载过。`tools/backfill-qq-images.mjs` 会去 OneBot 重新拉历史，按消息时间戳对上会话里的那条，把图下载进 `data/uploads/` 再挂到消息上。默认演练，加 `--apply` 才写盘（写完要重启应用，会话是从磁盘读的）：
+
+```
+node tools/backfill-qq-images.mjs <会话id>          # 只看会补几张
+node tools/backfill-qq-images.mjs <会话id> --apply  # 真写
+```
+
+**还有一个隐性坑**：V4 Pro 是纯文本模型，对话里明明存着图它也看不见，就会答「我没有读图能力」。所以 `/api/chat` 和 QQ 的 `chatOnce` 都加了一条判断——**只要这段对话里存在图片附件，本轮就换到能看图的 Flash**，哪怕这张图是几轮之前发的。
 ## 几个实现上的坑（改代码时留意）
 
 - **带 `tools` 的请求必须回传历轮的 `reasoning_content`，否则 400**；不带 tools 时反而不能传（传了也被忽略）。所以 `buildMessages` 只在联网时才把思考内容拼回历史。
