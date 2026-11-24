@@ -544,8 +544,10 @@ function attachmentsHTML(m) {
   const rest = list.filter(a => a.kind !== 'video' && a.kind !== 'audio');
   const mediaHTML = media.map(a => mediaBlockHTML(a)).join('');
   const items = rest.map(a => {
-    if (a.kind === 'image' && a.url) {
-      return `<a class="att-img" href="${esc(a.url)}" target="_blank" rel="noopener"><img src="${esc(a.url)}" alt="${esc(a.name || '')}" loading="lazy"></a>`;
+    // 老消息里可能只有 uploadId 没有 url（以前没存），一样要能显示出来
+    const src = a.url || (a.uploadId ? `/api/uploads/${a.uploadId}` : '');
+    if (a.kind === 'image' && src) {
+      return `<a class="att-img" href="${esc(src)}" target="_blank" rel="noopener"><img src="${esc(src)}" alt="${esc(a.name || '')}" loading="lazy"></a>`;
     }
     return `<span class="att-file">${ICON.file}<span class="att-name">${esc(a.name || a.uploadId || '文件')}</span>${a.fileId ? '<span class="att-tag">已解析</span>' : ''}</span>`;
   }).join('');

@@ -1022,17 +1022,24 @@ async function qqSendText(text) {
 }
 
 /** 能跑一轮对话却不走 SSE 的最小实现（给 QQ 回话用） */
-async function chatOnce(conv, text, settings) {
+async function chatOnce(conv, text, settings, { attachments = [] } = {}) {
   const apiKey = settings.apiKey || process.env.DEEPSEEK_API_KEY || '';
   if (!apiKey) throw new Error('没填 API Key，回不了话');
-  const userMessage = newMessage('user', text);
+  const userMessage = newMessage('user', text, attachments.length ? { attachments } : {});
   conv.messages.push(userMessage);
   if (conv.title === '新对话' || !conv.title) conv.title = autoTitle(text);
   await saveConversation(conv);
 
   const ctxSettings = ctxSettingsFor(conv, settings);
   const built = await buildMessages(conv, ctxSettings, { withTools: false });
-  const model = normalizeModel(conv.model || settings.model || 'deepseek-flash');
+  let model = normalizeModel(conv.model || settings.model || 'deepseek-flash');
+  if (model === 'auto') {
+    // 带图就只能走能看图的模型（V4.1 Flash）；纯文本还是按路由里的聊天模型
+    const hasImage = attachments.some(a => a && a.kind === 'image');
+    model = hasImage
+      ? normalizeModel(settings.routeThinkModel || 'deepseek-flash')
+      : normalizeModel(settings.routeChatModel || 'deepseek-v4-pro');
+  }
   const { chat } = apiEndpoints(settings.baseUrl);
   const r = await fetch(chat, {
     method: 'POST',
@@ -1129,6 +1136,63 @@ async function qqBindConversation(rawId) {
   return { ok: true, created: false, conv: { id: conv.id, title: conv.title, messages: conv.messages.length } };
 }
 
+// QQ 发来的图片：OneBot 里只给了 file/url，得自己下回来存成 upload，模型才看得见
+const QQ_IMAGE_MAX = 12 * 1024 * 1024;
+const QQ_IMAGE_EXT = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/jpg': '.jpg', 'image/gif': '.gif', 'image/webp': '.webp', 'image/bmp': '.bmp' };
+
+/** 图片二进制（先试直链，再请 OneBot 取本地文件） */
+async function qqImageBytes(cfg, ref) {
+  const src = String(ref || '').trim();
+  if (!src) return null;
+  if (/^https?:\/\//i.test(src)) {
+    const r = await fetch(src, {
+      headers: { 'user-agent': 'Mozilla/5.0', referer: 'https://im.qq.com/' },
+      signal: AbortSignal.timeout(20000),
+    }).catch(() => null);
+    if (r && r.ok) {
+      const buf = Buffer.from(await r.arrayBuffer());
+      if (buf.length && buf.length <= QQ_IMAGE_MAX) return { buf, mime: String(r.headers.get('content-type') || '').split(';')[0] || '' };
+    }
+    return null;
+  }
+  // file 名 / 本地路径：找 OneBot 要
+  const got = await onebot(cfg, 'get_image', { file: src }, { timeoutMs: 20000 }).catch(() => null);
+  const d = (got && (got.data || got)) || {};
+  const p = String(d.file || d.path || d.url || '');
+  if (!p) return null;
+  if (/^https?:\/\//i.test(p)) return qqImageBytes(cfg, p);
+  try {
+    const buf = await fsp.readFile(p);
+    if (buf.length && buf.length <= QQ_IMAGE_MAX) return { buf, mime: d.mime || '' };
+  } catch { /* 拿不到就算了 */ }
+  return null;
+}
+
+/** 把一条 QQ 消息里的图片落成附件（和网页上传的附件同一种形状） */
+async function qqImageAttachments(cfg, item, { limit = 4 } = {}) {
+  const out = [];
+  for (const ref of (item.images || []).slice(0, limit)) {
+    try {
+      const got = await qqImageBytes(cfg, ref);
+      if (!got || !got.buf) continue;
+      let mime = got.mime;
+      if (!(mime in QQ_IMAGE_EXT)) mime = 'image/png';
+      const ext = QQ_IMAGE_EXT[mime];
+      const uploadId = `${uid('u')}${ext}`;
+      await fsp.writeFile(path.join(UPLOAD_DIR, uploadId), got.buf);
+      out.push({
+        kind: 'image',
+        name: String(item.nick || 'QQ') + '-' + (out.length + 1) + ext,
+        mime,
+        size: got.buf.length,
+        uploadId,
+        url: `/api/uploads/${uploadId}`,
+      });
+    } catch { /* 单张失败不影响别的 */ }
+  }
+  return out;
+}
+
 /** 轮询一次：拉新消息 → 接进会话 → 让模型回 → 发回 QQ */
 async function qqPollOnce({ reply = true } = {}) {
   const settings = await loadSettings();
@@ -1181,7 +1245,8 @@ async function qqPollOnce({ reply = true } = {}) {
     // 只发不回：收到的话也要记进会话，不然界面上什么都看不到
     try {
       for (const item of usable) {
-        conv.messages.push(newMessage('user', qqUserPrompt(item, { callName: settings.qqCallName || '对方' })));
+        const atts = await qqImageAttachments(cfg, item);
+        conv.messages.push(newMessage('user', qqUserPrompt(item, { callName: settings.qqCallName || '对方' }), atts.length ? { attachments: atts } : {}));
       }
       conv.updatedAt = now();
       await saveConversation(conv);
@@ -1196,7 +1261,8 @@ async function qqPollOnce({ reply = true } = {}) {
         + '\n\n【这条回在手机上】按语义分段：每段单独发一条，段与段之间空一行。'
         + '短的一句话就是一段；长的按意思拆成几段，别把「第一」「第二」和它后面的解释拆开。'
         + '句末不要加句号，最多八段。';
-      const res = await chatOnce(conv, ask, settings);
+      const atts = await qqImageAttachments(cfg, item);
+      const res = await chatOnce(conv, ask, settings, { attachments: atts });
       // 一句一条地发，中间留点间隔，像人打字
       const parts = qqSemanticParts(res.answer);
       const ids = [];
@@ -3959,6 +4025,8 @@ async function handleChat(req, res) {
         return {
           ...base,
           uploadId: String(a.uploadId),
+          // url 一定要存：附件气泡靠它渲染图片，只有 uploadId 的话历史里就变成一块「文件」
+          url: String(a.url || `/api/uploads/${a.uploadId}`),
           ...(a.fileId ? { fileId: String(a.fileId) } : {}),
         };
       })

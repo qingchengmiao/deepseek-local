@@ -598,6 +598,20 @@ pwsh -NoProfile -File tools\_run-fresh.ps1 -Tests qq-test,context-test,route-tes
 - 测：`node tools\learn-service-test.mjs`（48 项，假 OneBot 造 120 条两周数据）、`node tools\qq-learn-test.mjs`（57 项，纯函数层）；截图 `node tools\shot-learn-page.mjs`
 
 数据侧现在还跑不起来：隔离实例要在线（`phase=online`）并且这个号得在群里，否则 `/api/learn/groups` 返回空。
+## 图片与附件（2026-11-25 补）
+
+发图看不到，其实有两个不同的原因，都已经修了。
+
+**网页里的图**：`server.mjs` 存用户消息附件时漏了 `url`，只留了 `uploadId`。气泡渲染那边要 `a.url` 才画 `<img>`，所以新发的图全退化成一块「文件」小标签（导入进来的老会话反而正常，因为它们带着 url）。现在存储时一定写 `url: /api/uploads/<uploadId>`，前端也多一层兜底：`a.url || (a.uploadId ? '/api/uploads/'+a.uploadId : '')`。
+
+**QQ 发来的图**：`qq.mjs` 把 image 段只拼成 `[图片]` 文本，图从来没下载过，模型当然说「我看不到图片」。现在 `server.mjs` 的 `qqPollOnce()` 会先 `qqImageAttachments()`：
+
+- `qqImageBytes()` 先试段里的直链（带 UA/Referer），拿不到就请 OneBot `get_image` 要本地文件，都不行就跳过单张；
+- 落盘到 `data/uploads/`（单个上限 12 MB，一条消息最多 4 张），附件形状和网页上传的一模一样；
+- `chatOnce(conv, text, settings, { attachments })` 带上这些附件；带图时模型自动切到能看图的 `routeThinkModel`（V4.1 Flash），纯文字还是走 `routeChatModel`；
+- 「只发不回」模式也照样挂附件，界面上能看到图。
+
+验法：`node tools/qq-image-test.mjs`（假 OneBot 发一张 16×16 PNG，18 项：附件落地、`GET /api/uploads` 能取回、发给上游的请求里真有 `image_url` 的 base64 块、模型是 flash、纯文字消息不带图）。
 ## 几个实现上的坑（改代码时留意）
 
 - **带 `tools` 的请求必须回传历轮的 `reasoning_content`，否则 400**；不带 tools 时反而不能传（传了也被忽略）。所以 `buildMessages` 只在联网时才把思考内容拼回历史。
