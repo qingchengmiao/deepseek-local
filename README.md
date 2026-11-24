@@ -555,7 +555,7 @@ pwsh -NoProfile -File tools\_run-fresh.ps1 -Tests qq-test,context-test,route-tes
 
 `skills/<id>/SKILL.md` 就是一份技能，DSH 里那套格式照搬：YAML front matter 写 `name` / `description`，正文是要注入的内容。
 
-- 位置：`skills/`（开发态与 `resources\app\skills` 各一份，装好的实例读自己那份）。`DSAPP_SKILLS` 环境变量可以指到别的目录，测试用。
+- 位置：**数据目录下的 `skills/`**（`data/skills`，装好后是 exe 旁边的 `data\skills`）。代码里自带的那份 `resources\app\skills` 只在第一次启动时「播种」过去，已有的一律不动 —— 所以覆盖 dist 里的代码、升级版本，都不会把你自己装的/改过的技能换掉。`DSAPP_SKILLS` 仍可指到别处（指了就完全听它的，既不播种也不读自带那份，测试与多开实例都靠这个）。
 - 识别：只认有 `SKILL.md` 的目录；没 front matter 就用第一个 `# 标题` 当名字、第一段非标题文字当描述。
 - 注入：设置里勾上的（`settings.enabledSkills`）在 `buildMessages` 里拼成**单独一条 system**，抬头 `【技能：名字】`，跟在风格提示后面。单个技能上限 6000 字，超了截断并注一句「技能过长已截断」。
 - 与回复风格无关：`native` 也照样注入技能，两件事互不影响。
@@ -577,7 +577,7 @@ pwsh -NoProfile -File tools\_run-fresh.ps1 -Tests qq-test,context-test,route-tes
 
 验证：`node tools/skill-install-test.mjs`（30 项：JSON 直传、单 md、zip 含子目录、`__MACOSX` 垃圾、重名加后缀、非法扩展名 400、zip 里 `../` 不越界、启停、删除、`..` id 400、空内容 400）。截图 `data/shots/101-技能页.png`。
 
-注意：装进的是**app 自己那份** `skills/`（跑起来是 `resources\app\skills`）。以后如果拿仓库的 `dist` 整个覆盖过去，用户自装的技能会被换掉，要么先拷出来、要么把 `DSAPP_SKILLS` 指到一个固定目录。
+注意：装进的是**数据目录那份** `data/skills`（不是 `resources\app\skills`），所以覆盖 dist 代码不会丢技能。想让技能跟着别的东西走、或者两个实例共用一套技能，就把 `DSAPP_SKILLS` 指到一个固定目录（比如 `%LOCALAPPDATA%\DeepSeekLocal\skills`）。全新装置（连 `settings.json` 都没有）第一次启动会把自带技能播进去并默认勾上；已有设置文件的只播种、不动你勾的。
 
 第一个真技能是 `skills/video-platform-voice`（视频平台语感），数字不是手写的，是从 `voice-video\gen_skill.py` 读 102 万条语料统计生成的：弹幕中位 6 字、78% 不带句末标点、语气词 3.04/100 字、各分区性格表、各平台对照，末尾写明「抖音/快手/西瓜没采到，别编」。
 

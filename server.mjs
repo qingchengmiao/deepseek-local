@@ -261,7 +261,13 @@ const HUMAN_STYLE_PROMPT = `你不是在写报告，是在跟人说话。第一�
 短了就别写句号；一个暗喻就够，别在三十个字里塞两个比喻。`;
 
 // ---- 技能包：skills/<id>/SKILL.md，YAML front matter 给 name/description，正文就是注入内容
-const SKILLS_DIR = process.env.DSAPP_SKILLS ? path.resolve(process.env.DSAPP_SKILLS) : path.join(ROOT, 'skills');
+// 技能目录：默认放在数据目录下（data/skills），这样覆盖 dist 里的代码不会把自装的技能换掉。
+// DSAPP_SKILLS 仍然可以指到别处（测试用）。
+const SKILLS_DIR = process.env.DSAPP_SKILLS
+  ? path.resolve(process.env.DSAPP_SKILLS)
+  : path.join(DATA, 'skills');
+// 代码里自带的技能（开发态是 skills/，装好后是 resources\app\skills）：只用来首次播种
+const BUNDLED_SKILLS_DIR = path.join(ROOT, 'skills');
 const SKILL_MAX_CHARS = 6000; // 单个技能注入上限，防止把上下文挤爆
 
 function parseSkillMeta(text) {
@@ -316,6 +322,35 @@ function listSkills() {
       files,
       file,
     });
+  }
+  return out;
+}
+
+/**
+ * 第一次跑的时候把随包技能播到 SKILLS_DIR。
+ * 已存在的目录一律不动 —— 这样覆盖 dist 里的代码、升级版本，都不会把你自装的/改过的技能换掉。
+ * 返回 { fresh, seeded }：fresh = 之前连 settings.json 都没有（全新装置），seeded = 这次播进去的 id。
+ */
+function seedSkillsFromBundle() {
+  const out = { fresh: !existsSync(SETTINGS_FILE), seeded: [] };
+  try {
+    // 显式指了 DSAPP_SKILLS 就完全听它的（测试/多开实例：别往里播东西）
+    if (process.env.DSAPP_SKILLS) return out;
+    if (!existsSync(BUNDLED_SKILLS_DIR)) return out;
+    if (path.resolve(BUNDLED_SKILLS_DIR) === path.resolve(SKILLS_DIR)) return out;
+    fs.mkdirSync(SKILLS_DIR, { recursive: true });
+    for (const d of fs.readdirSync(BUNDLED_SKILLS_DIR, { withFileTypes: true })) {
+      if (!d.isDirectory()) continue;
+      const src = path.join(BUNDLED_SKILLS_DIR, d.name);
+      const dst = path.join(SKILLS_DIR, d.name);
+      if (existsSync(dst)) continue;
+      if (!existsSync(path.join(src, 'SKILL.md'))) continue;
+      fs.cpSync(src, dst, { recursive: true });
+      out.seeded.push(d.name);
+      log(`技能播种：${d.name} → ${dst}`);
+    }
+  } catch (e) {
+    log('技能播种失败（不影响启动）：', e.message);
   }
   return out;
 }
@@ -5665,6 +5700,11 @@ async function main() {
   }
 
   await ensureDirs();
+  const seeded = seedSkillsFromBundle();
+  if (seeded.fresh && seeded.seeded.length) {
+    // 全新装置：随包技能默认打开，省得装了白装；有设置文件的（升级）一律尊重用户勾选
+    await saveSettings({ enabledSkills: seeded.seeded });
+  }
   await autoImportOnFirstRun();
 
   const server = http.createServer(async (req, res) => {
