@@ -274,6 +274,19 @@ const QQ_VOICE_PROMPT = `【在 QQ 上跟熟人说话】手机打字，一条能
 语气词少量放句尾：啊/吧/呢/呗/嘛，一条最多一两个；不用「典」「孝」「急了」这种带刺的。
 不知道就说不知道，说错了当场改口，别硬凑。`;
 
+// 反向提示：把「鱼八股」（AI 模板腔）列出来禁掉，比只说「别像 AI」有用
+const ANTI_BA_GOO_PROMPT = `【下面这些是模板腔，一条都别写】
+不是……而是…… / 不仅……更是…… 这类对仗；一段里顶多一次。
+首先/其次/最后、第一/第二/第三 给日常聊天排秩序。
+值得注意的是 / 综上所述 / 总的来说 / 换句话说 / 与此同时 这类过渡词。
+「在这个……的时代」「随着……的发展」起手。
+「让我们一起」「希望对你有所帮助」「如果你需要，我可以……」收尾。
+赋能 / 闭环 / 抓手 / 颗粒度 / 对齐认知 这套 PPT 词。
+每段末尾复述一遍刚说过的话；给每个名词加粗；三连排比。
+客服腔：「我理解你的感受」「很抱歉给你带来不便」「感谢你的耐心」。
+自己刚用的梗还要解释一句。
+要表达同样的意思，就换成一句具体的、能核对的话。`;
+
 // ---- 技能包：skills/<id>/SKILL.md，YAML front matter 给 name/description，正文就是注入内容
 // 技能目录：默认放在数据目录下（data/skills），这样覆盖 dist 里的代码不会把自装的技能换掉。
 // DSAPP_SKILLS 仍然可以指到别处（测试用）。
@@ -499,6 +512,7 @@ const DEFAULT_SETTINGS = {
   temperature: 1.0,
   systemPrompt: '',
   replyStyle: 'human', // native=原生（不注入）| human=活人感 | custom=只用自己的 systemPrompt
+  antiBaGu: true, // 反向提示：把 AI 模板腔（对仗句/首先其次/综上所述/赋能闭环）列出来禁掉
   enabledSkills: [], // 用户手动启用的技能 id（skills/<id>/SKILL.md）
   maxHistoryMessages: 0, // 0 = 不截断
   theme: 'auto',
@@ -805,6 +819,7 @@ async function saveSettings(patch) {
     else if (k === 'ttsVoice') next.ttsVoice = v === 'tide' ? 'tide' : 'stella';
     else if (k === 'language') next.language = LANGUAGES.includes(v) ? v : '中文';
     else if (k === 'replyStyle') next.replyStyle = ['native', 'human', 'custom'].includes(v) ? v : 'human';
+    else if (k === 'antiBaGu') next.antiBaGu = v !== false;
     else if (k === 'enabledSkills') {
       const ids = new Set(listSkills().map(s => s.id));
       const arr = Array.isArray(v) ? v : [];
@@ -3777,23 +3792,23 @@ async function buildMessages(conv, settings, { withTools = false } = {}) {
   // ---- 拼消息
   const out = [];
   const ownPrompt = String(conv.systemPrompt || settings.systemPrompt || '').trim();
-  const style = String(settings.replyStyle || 'human');
+  // 说话口径：会话自己的选择 > QQ 会话默认走熟人语气 > 全局设置
+  const isQQConv = conv.source === 'qq' || (settings.qqConvId && conv.id === settings.qqConvId);
+  const style = String(conv.replyStyle || (isQQConv ? 'qq' : (settings.replyStyle || 'human')));
   // 「活人感」是给日常对话治 AI 腔用的：只留最有效的几条，长篇禁则反而会把回答捆住
-  const stylePrompt = style === 'human' ? HUMAN_STYLE_PROMPT : '';
-  const systemPrompt = [stylePrompt, ownPrompt].filter(Boolean).join('\n\n');
+  const styleParts = [];
+  if (style === 'human' || style === 'qq') styleParts.push(HUMAN_STYLE_PROMPT);
+  if (style === 'qq' && settings.qqStyle !== false) styleParts.push(QQ_VOICE_PROMPT);
+  if (style !== 'native' && settings.antiBaGu !== false) styleParts.push(ANTI_BA_GOO_PROMPT);
+  const systemPrompt = [...styleParts, ownPrompt].filter(Boolean).join('\n\n');
   if (systemPrompt) out.push({ role: 'system', content: systemPrompt });
+  if (style) meta.style = style;
 
   // 技能包：跟在系统提示词后面，单独一条，别和活人感混成一大段
   const skillText = skillsPrompt(settings);
   if (skillText) {
     out.push({ role: 'system', content: skillText });
     meta.skills = (settings.enabledSkills || []).slice();
-  }
-
-  // QQ 上的说话方式：单独一条，只给 QQ 会话（网页里跟人聊天不用这一套手机打字的口径）
-  if (settings.qqStyle !== false && (conv.source === 'qq' || (settings.qqConvId && conv.id === settings.qqConvId))) {
-    out.push({ role: 'system', content: QQ_VOICE_PROMPT });
-    meta.qqStyle = true;
   }
 
   // 群聊自学习：会话如果绑了某个群，就带上那群人说话的画像（句长/语气词/省略主语/节奏/在用的梗）
@@ -5437,6 +5452,12 @@ async function handleApi(req, res, url) {
       if (typeof body.pinned === 'boolean') conv.pinned = body.pinned;
       if (typeof body.systemPrompt === 'string') conv.systemPrompt = body.systemPrompt;
       if (typeof body.model === 'string' && body.model) conv.model = body.model;
+      // 每个会话自己的说话口径：'' = 跟随设置；native/human/qq/custom 见 buildMessages
+      if (typeof body.replyStyle === 'string') {
+        const v = body.replyStyle.trim();
+        if (['native', 'human', 'qq', 'custom'].includes(v)) conv.replyStyle = v;
+        else delete conv.replyStyle;
+      }
       // 每个会话自己的上下文参数：传 {} 或 null = 全部改回跟随全局
       if ('ctx' in body) {
         const ov = normalizeCtxOverrides(body.ctx);

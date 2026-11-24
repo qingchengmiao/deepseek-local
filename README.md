@@ -603,6 +603,29 @@ pwsh -NoProfile -File tools\_run-fresh.ps1 -Tests qq-test,context-test,route-tes
 QQ 会话（`source === 'qq'`，或 id 等于 `qqConvId`）会多收到一条 system：`QQ_VOICE_PROMPT`。它是从 `cn-net-voice` + `human-voice` 两个技能包的实测参数压出来的，不是随手写的规矩——小句 4–12 字、短句占一半、中文八成句子省主语、每两三句给一个能核对的东西、转折放在前中段、感叹号一条最多一个、不写「综上所述」这类串场词。
 
 开关是 `qqStyle`（默认开）。关掉就是只剩通用的「活人感」提示。回话时的分段也一起放宽了：一次最多切三段、段落上限 140 字，不再一句一条地刷屏。
+
+### 逐对话调口径（2026-11-25 加）
+
+顶栏模型按钮左边多了一个下拉，选的就是**这个会话**的说话口径，改完立刻生效：
+
+| 选的值 | 实际注入 |
+| --- | --- |
+| 跟随设置（空） | 全局 `replyStyle`；QQ 会话没设过就默认走 `qq` |
+| `human` | `HUMAN_STYLE_PROMPT` + 反八股 |
+| `qq` | `HUMAN_STYLE_PROMPT` + `QQ_VOICE_PROMPT`（`qqStyle` 开着时）+ 反八股 |
+| `native` | 一条都不加 |
+| `custom` | 只用自己的系统提示词（反八股仍在，可全局关） |
+
+存的是会话自己的 `conv.replyStyle`（`PATCH /api/conversations/<id> { replyStyle: '' | 'native' | 'human' | 'qq' | 'custom' }`，空串=删掉此字段、跟随全局）。拼装只在 `buildMessages` 里做一次。
+
+### 反八股（2026-11-25 加）
+
+「鱼八股」就是这套东西的模板腔。`ANTI_BA_GOO_PROMPT` 用**反向清单**写：不是…而是…／不仅…更是… 的对仗、首先其次最后、值得注意的是／综上所述／换句话说、「在这个…的时代」起手、「希望对你有所帮助」收尾、赋能／闭环／抓手／颗粒度、段末复述+名词加粗+三连排比、客服腔、「自己刚用的梗还要解释一句」。比只说「别像 AI」有用——列出来的东西模型不会去撞。
+
+开关 `antiBaGu`（默认开）；`native` 不注入，`custom` 仍注入（它管的是腔调，不是内容口径）。
+
+验证：`node tools/voice-style-test.mjs`（假上游 + 隔离实例，14 项：网页会话带活人感/反八股/不带手机打字口径、逐对话改 qq 生效、native 两条都不带、custom 只带自己的、空串回落全局、全局关掉反八股后不再出现、绑了群的会话默认走 QQ 口径）。顺手改了历史消息：早期那条「【这条回在手机上】按语义分段…最多八段」是我塞进用户消息里的旧口径，已经用 `tools/_clean-legacy-qq-suffix.mjs` 从 `QQ 2` 的 28 条历史里剥掉（改前备份在 `data/backups/conv-legacy-*`）。
+
 ## 图片与附件（2026-11-25 补）
 
 发图看不到，其实有两个不同的原因，都已经修了。

@@ -214,6 +214,15 @@ a:hover { text-decoration: underline; }
 }
 .model-btn:hover { background: var(--hover); color: var(--text); }
 
+.voice-sel {
+  height: 32px; padding: 0 6px; border-radius: 9px; max-width: 132px;
+  border: 1px solid var(--border); background: transparent; color: var(--text-2);
+  font-size: 13px; font-family: inherit; cursor: pointer;
+}
+.voice-sel:hover { background: var(--hover); color: var(--text); }
+.voice-sel.on { border-color: var(--primary); color: var(--primary); font-weight: 550; }
+.voice-sel option { background: var(--bg); color: var(--text); }
+
 /* 消息区 */
 .scroller { flex: 1; overflow-y: auto; overflow-x: hidden; scroll-behavior: smooth; min-height: 0; }
 .messages { max-width: 800px; margin: 0 auto; padding: 14px 24px 40px; }

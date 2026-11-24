@@ -109,7 +109,7 @@ try {
   const styleHits = sysAll.filter(m => String(m.content).includes('第一句就给答案')).length;
   check('风格提示只注入一次', styleHits === 1, `命中 ${styleHits} 次`);
   check('system 不超过 2 条（原生本来就有 1 条基本提示）', sysAll.length <= 2, `${sysAll.length} 条`);
-  check('活人感：临时设定并进同一条 system', sysAll.length === 1 && sysAll[0].content.includes('临时设定'), `${sysAll.length} 条`);
+  check('活人感：临时设定并进最后一条 system', sysAll.length >= 1 && sysAll[sysAll.length - 1].content.includes('临时设定'), `${sysAll.length} 条`);
 
   // 原生：不该注入
   await put('/api/settings', { replyStyle: 'native' });

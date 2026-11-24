@@ -796,6 +796,10 @@ function currentModel() {
   return (S.conv && S.conv.model) || S.settings.model || 'deepseek-flash';
 }
 
+function voiceLabel(v) {
+  return ({ native: '原生', human: '活人感', qq: 'QQ 熟人', custom: '只用自定义提示' })[v] || '活人感';
+}
+
 function modelLabel(id) {
   if (id === 'auto') return '自动';
   const m = S.models.find(x => x.id === id);
@@ -870,6 +874,18 @@ function syncComposerMode() {
   $('#effortSel').style.display = thinking ? '' : 'none';
   $('#modelLabel').textContent = modelLabel(currentModel());
   $('#modelBtn').title = `当前模型：${currentModel()}（点这里换）`;
+  const voice = $('#voiceSel');
+  if (voice) {
+    const isQQ = S.conv && (S.conv.source === 'qq' || (S.settings.qqConvId && S.conv.id === S.settings.qqConvId));
+    const own = (S.conv && S.conv.replyStyle) || '';
+    voice.classList.toggle('hidden', !S.conv);
+    voice.value = own;
+    const eff = own || (isQQ ? 'qq' : (S.settings.replyStyle || 'human'));
+    voice.title = S.conv
+      ? `这个会话的说话口径：${own ? '' : '跟随设置（'}${voiceLabel(eff)}${own ? '' : '）'}（改了立刻生效）`
+      : '';
+    voice.classList.toggle('on', !!own && own !== (isQQ ? 'qq' : (S.settings.replyStyle || 'human')));
+  }
   $('#composerHint').textContent = S.streaming ? '正在生成…' : '';
   applySendState();
 }
@@ -3027,6 +3043,20 @@ $('#learnNavBtn').addEventListener('click', openLearnPage);
   $('#micChip').addEventListener('click', toggleRecord);
 
   $('#ctxBadge').addEventListener('click', openContextPanel);
+
+  $('#voiceSel').addEventListener('change', async e => {
+    if (!S.conv) return;
+    const v = e.currentTarget.value;
+    try {
+      const r = await api(`/api/conversations/${S.conv.id}`, { method: 'PATCH', body: { replyStyle: v } });
+      if (r && r.conversation) S.conv.replyStyle = r.conversation.replyStyle;
+      if (!v) delete S.conv.replyStyle;
+      syncComposerMode();
+      toast(v ? `这个会话改口径：${voiceLabel(v)}` : '这个会话改回跟随设置', 1800);
+    } catch (err) {
+      toast('改口径失败：' + err.message, 4000);
+    }
+  });
 
   $('#modelBtn').addEventListener('click', e => {    const r = e.currentTarget.getBoundingClientRect();
     const cur = currentModel();
