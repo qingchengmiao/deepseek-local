@@ -598,6 +598,11 @@ pwsh -NoProfile -File tools\_run-fresh.ps1 -Tests qq-test,context-test,route-tes
 - 测：`node tools\learn-service-test.mjs`（48 项，假 OneBot 造 120 条两周数据）、`node tools\qq-learn-test.mjs`（57 项，纯函数层）；截图 `node tools\shot-learn-page.mjs`
 
 数据侧现在还跑不起来：隔离实例要在线（`phase=online`）并且这个号得在群里，否则 `/api/learn/groups` 返回空。
+## QQ 上的说话口径（2026-11-25 加）
+
+QQ 会话（`source === 'qq'`，或 id 等于 `qqConvId`）会多收到一条 system：`QQ_VOICE_PROMPT`。它是从 `cn-net-voice` + `human-voice` 两个技能包的实测参数压出来的，不是随手写的规矩——小句 4–12 字、短句占一半、中文八成句子省主语、每两三句给一个能核对的东西、转折放在前中段、感叹号一条最多一个、不写「综上所述」这类串场词。
+
+开关是 `qqStyle`（默认开）。关掉就是只剩通用的「活人感」提示。回话时的分段也一起放宽了：一次最多切三段、段落上限 140 字，不再一句一条地刷屏。
 ## 图片与附件（2026-11-25 补）
 
 发图看不到，其实有两个不同的原因，都已经修了。

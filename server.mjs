@@ -262,6 +262,18 @@ const HUMAN_STYLE_PROMPT = `你不是在写报告，是在跟人说话。第一�
 别一句话塞一串逗号——真人宁可断成两句；句子过半要短（十个字以内），转折放在前半段，别先摆结论再硬拐。
 短了就别写句号；一个暗喻就够，别在三十个字里塞两个比喻。`;
 
+// QQ 上的说话方式：按 cn-net-voice + human-voice 那套实测参数来（18.3 万话轮量出来的）
+// 能省就省：手机上打字，一条能说完就别拖两条；数字是硬指标，别写成口号
+const QQ_VOICE_PROMPT = `【在 QQ 上跟熟人说话】手机打字，一条能说完就别拖两条。
+小句 4–12 字，短句（8 字以内）占一半；主语能省就省，中文真话里八成句子不带「我/你」。
+每两三句得有一个能核对的东西：几点了、多少钱、哪张图、哪个文件，别拿「很明显」「提升很大」糊过去。
+转折放在前中段：先认一半，再说但书，别一条道走到黑才翻。
+情绪别拉满：感叹号一条最多一个，笑声词一个，emoji 不超过两个且放句尾。
+不写「值得注意的是」「综上所述」「希望对你有帮助」这类串场词，也不打清单、不加小标题。
+收尾要么直接停，要么把话头抛回去，别总结自己刚说过的话。
+语气词少量放句尾：啊/吧/呢/呗/嘛，一条最多一两个；不用「典」「孝」「急了」这种带刺的。
+不知道就说不知道，说错了当场改口，别硬凑。`;
+
 // ---- 技能包：skills/<id>/SKILL.md，YAML front matter 给 name/description，正文就是注入内容
 // 技能目录：默认放在数据目录下（data/skills），这样覆盖 dist 里的代码不会把自装的技能换掉。
 // DSAPP_SKILLS 仍然可以指到别处（测试用）。
@@ -524,6 +536,7 @@ const DEFAULT_SETTINGS = {
   qqPollMs: 5000,
   qqConvId: '', // 收进来的消息接到哪个会话；空 = 自动建一个「QQ」
   qqCallName: '对方',
+  qqStyle: true, // QQ 回话按真人语料那套口径说（关掉就只剩通用的活人感提示）
   qqNapCatDir: 'D:\\NapCatOneKey', // NapCat 装在哪：扫码登录、找二维码都从这里翻
   // 隔离实例（C++ 宿主）：自己的 Shell 副本 + 自己的 QQ 号 + 自己的端口，跟 DSH 的 echo 实例互不相干
   napcatShell: 'D:\\NapCatDSL\\Shell',
@@ -774,6 +787,7 @@ async function saveSettings(patch) {
     else if (k === 'qqGroup') next.qqGroup = String(v || '').replace(/[^\d]/g, '').slice(0, 20);
     else if (k === 'qqConvId') next.qqConvId = String(v || '').trim().slice(0, 60);
     else if (k === 'qqCallName') next.qqCallName = String(v || '').trim().slice(0, 20) || '对方';
+    else if (k === 'qqStyle') next.qqStyle = v !== false;
     else if (k === 'qqPollMs') next.qqPollMs = Math.max(2000, Math.min(60000, Math.floor(Number(v) || 5000)));
     else if (k === 'qqNapCatDir') next.qqNapCatDir = String(v || '').trim().slice(0, 240) || DEFAULT_SETTINGS.qqNapCatDir;
     else if (k === 'napcatShell') next.napcatShell = String(v || '').trim().slice(0, 240) || DEFAULT_SETTINGS.napcatShell;
@@ -3774,6 +3788,12 @@ async function buildMessages(conv, settings, { withTools = false } = {}) {
   if (skillText) {
     out.push({ role: 'system', content: skillText });
     meta.skills = (settings.enabledSkills || []).slice();
+  }
+
+  // QQ 上的说话方式：单独一条，只给 QQ 会话（网页里跟人聊天不用这一套手机打字的口径）
+  if (settings.qqStyle !== false && (conv.source === 'qq' || (settings.qqConvId && conv.id === settings.qqConvId))) {
+    out.push({ role: 'system', content: QQ_VOICE_PROMPT });
+    meta.qqStyle = true;
   }
 
   // 群聊自学习：会话如果绑了某个群，就带上那群人说话的画像（句长/语气词/省略主语/节奏/在用的梗）
