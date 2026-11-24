@@ -717,3 +717,14 @@ node tools/backfill-qq-images.mjs <会话id> --apply  # 真写
 - 打包前记得：`dist/DeepSeek-win32-x64/data` 是指向仓库 `data/` 的 junction（装着你的会话数据），`.iss` 里用 `Excludes: "data,data\*"` 排除它；`dist/DeepSeek-win32-x64/locales` 只留 `en-US/zh-CN/zh-TW.pak` 能省 47 MB。
 - 安装后数据在 `%LOCALAPPDATA%\DeepSeekLocal\data`，第一次启动是空会话列表；卸载**不会**删这个目录（用户数据留着）。
 - 装的时候需要写桌面快捷方式和 `HKCU` 卸载键，必须用你自己的账户在资源管理器里双击安装包；在沙箱化/受限令牌的进程里跑会以 `0x80070005 拒绝访问` 回滚（详见日志 `%TEMP%\*.log`）。
+
+## 我自己怎么说话（2026-11-25 加）
+
+群学习看的是「一群人怎么说话」，这一层只看一个人：**你**在网页里打的字、QQ 上发来的消息。
+
+- 量什么：一条消息多少字、小句中位、≤8 字短句占比、语气词密度、省略主语比例、不写句末标点比例、问句占比、平均情绪、常挂嘴边的词（整句重复 + 小句开头 + 小句收尾）、习惯怎么开头、常出没时段、图片数。
+- 数据落 `data/user-learn/profile.json`；`data/` 不出这台机器。
+- 两个开关分开：学习页上的「对话里带上」= `meInject`（每轮把这段画像塞一条 system，默认关），「重新量一遍」= 强制重算并落盘。
+- 接口：`GET /api/learn/me` 看摘要、`POST /api/learn/me/refresh` 重算。
+- 口径：只收 `role === 'user'` 的消息；QQ 消息进库时套的「【来自 QQ 上的对方（uid），时间】」抬头和「【这条回在手机上】…」尾巴会先剥掉再量，不然量出来的是我们自己的提示词。
+- 测试：`node tools/user-learn-test.mjs`（53 项）、`node tools/voice-style-test.mjs`（含 meInject 端到端 7 项）、`node tools/shot-learn-me.mjs`（拍学习页顶部那块）。

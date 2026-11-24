@@ -62,6 +62,7 @@ import {
 } from './calendar.mjs';
 import { qqConfig, onebot, loginInfo, sendPrivate, sendGroup, friendHistory, groupHistory, pickNew, qqUserPrompt } from './qq.mjs';
 import { createLearnService } from './learn-service.mjs';
+import { createUserLearnService, buildOwnProfileText } from './user-learn.mjs';
 import { isoWeek } from './qqgroup.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -572,6 +573,9 @@ const DEFAULT_SETTINGS = {
   learnN: 6, // 情绪突变看的后续条数
   learnPages: 2, // 每轮翻几页历史
   learnLastSettledWeek: '', // 上次跨周结算的周
+  // ---- 用户对话学习：从「我自己说过的话」里量说话样子（网页打的字 + QQ 发来的消息）
+  meInject: false, // 打开后，每条请求会带上「对方平时怎么说话」的画像
+  meMax: 400, // 画像注入的字数上限
 };
 
 // ---------------------------------------------------------------- 小工具
@@ -846,6 +850,8 @@ async function saveSettings(patch) {
     else if (k === 'learnN') next.learnN = Math.max(1, Math.min(30, Math.floor(Number(v) || 6)));
     else if (k === 'learnPages') next.learnPages = Math.max(1, Math.min(20, Math.floor(Number(v) || 2)));
     else if (k === 'learnLastSettledWeek') next.learnLastSettledWeek = String(v || '').slice(0, 20);
+    else if (k === 'meInject') next.meInject = v === true;
+    else if (k === 'meMax') next.meMax = Math.max(100, Math.min(2000, Math.floor(Number(v) || 400)));
     else if (typeof v === 'boolean') next[k] = v;
     else next[k] = v;
   }
@@ -999,6 +1005,25 @@ const learn = createLearnService({
     return { ...s, __qq: effQqConfig(s) };
   },
   saveSettings: (patch) => saveSettings(patch),
+});
+
+// 用户对话学习：把这个人在网页/QQ 上自己打的字拿出来，量他的句长、语气词、标点、口头禅。
+// 和群学习分开两套，因为口径不一样：群是「一群人」，这里是「一个人」。
+const userLearn = createUserLearnService({
+  dataDir: DATA,
+  loadConversations: async () => {
+    const idx = await loadIndex();
+    const out = [];
+    for (const e of idx) {
+      const id = e && (e.id || e.convId);
+      if (!id) continue;
+      try {
+        const conv = await loadConversation(String(id));
+        if (conv) out.push(conv);
+      } catch { /* 坏文件跳过，不影响整体学习 */ }
+    }
+    return out;
+  },
 });
 async function qqStatus() {
   const settings = await loadSettings();
@@ -3822,6 +3847,17 @@ async function buildMessages(conv, settings, { withTools = false } = {}) {
     } catch { /* 画像拿不到就当没开 */ }
   }
 
+  // 用户对话学习：按需把「对方平时怎么说话」当成背景知识带上（默认关）
+  if (settings.meInject === true) {
+    try {
+      const me = await userLearn.profileFor({ maxChars: Number(settings.meMax) || 400 });
+      if (me) {
+        out.push({ role: 'system', content: me });
+        meta.me = { chars: me.length };
+      }
+    } catch { /* 量不出来就当没开 */ }
+  }
+
   // 日历：把今天 / 接下来几天的日程带上（模型能主动说「你下午三点有会」）
   if (settings.calendarInContext !== false) {
     try {
@@ -5075,6 +5111,21 @@ async function handleApi(req, res, url) {
       maxChars: Number(url.searchParams.get('max')) || 600,
     });
     return sendJson(res, 200, { profile: md });
+  }
+
+  // ---------------- 用户对话学习：量「我自己」怎么说话（网页打的字 + QQ 上发来的消息）
+  if (pathname === '/api/learn/me' && method === 'GET') {
+    return sendJson(res, 200, await userLearn.summary());
+  }
+  if (pathname === '/api/learn/me/refresh' && method === 'POST') {
+    try {
+      const a = await userLearn.build({ write: true, force: true });
+      const settings = await loadSettings();
+      const profile = a && !a.empty ? buildOwnProfileText(a, { maxChars: Number(settings.meMax) || 400 }) : '';
+      return sendJson(res, 200, { ok: true, ...(await userLearn.summary()), profile });
+    } catch (e) {
+      return sendJson(res, 400, { error: e.message });
+    }
   }
 
   // ---------------- 技能包（skills/<id>/SKILL.md）

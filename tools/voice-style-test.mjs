@@ -121,6 +121,20 @@ try {
       ok(`绑定群 ${gid} 的会话默认走 QQ 口径`, sq.includes('手机') === wantQQ);
     }
   }
+  // 8) 用户对话学习：打开 meInject 后，system 里应该出现「对方平时怎么说话」那段
+  await j('/api/settings', { method: 'PUT', body: { meInject: false } });
+  const s7 = await send(c1);
+  ok('默认不带我说话的画像', !s7.includes('对方平时怎么说话'));
+  const me = await j('/api/learn/me');
+  ok('能读到自己的画像摘要', me && me.ok === true, JSON.stringify(me).slice(0, 80));
+  await j('/api/settings', { method: 'PUT', body: { meInject: true, meMax: 400 } });
+  const s8 = await send(c1);
+  ok('打开后带上我说话的画像', s8.includes('对方平时怎么说话'), s8.slice(-120));
+  ok('画像里写了量出来的东西', /句长|一条消息/.test(s8));
+  ok('画像不超过字数上限', (s8.split('对方平时怎么说话')[1] || '').length <= 460);
+  const rf = await j('/api/learn/me/refresh', { method: 'POST', body: {} });
+  ok('重新量一遍能落盘', rf && rf.ok === true && typeof rf.profile === 'string');
+  await j('/api/settings', { method: 'PUT', body: { meInject: false } });
 } finally {
   srv.kill();
   upstream.close();

@@ -3929,6 +3929,22 @@ function learnPageHtml() {
   <div class="lt-panel">
     <div class="lt-head">
       <div>
+        <h3>我自己怎么说话</h3>
+        <p class="muted">只量你发出去的话——网页里打的字、QQ 上发来的消息。落在本机 <code>data/user-learn</code>，不出这台机器。</p>
+      </div>
+      <div class="lt-switches">
+        <label class="switch-row"><span>对话里带上<small>让模型照着你的语感回</small></span><input type="checkbox" id="ltMeInject"></label>
+      </div>
+    </div>
+    <div class="lt-actions">
+      <button class="btn" data-x="ltMe">重新量一遍</button>
+      <span class="muted" id="ltMeHint">正在读…</span>
+    </div>
+    <div id="ltMeBody"></div>
+  </div>
+  <div class="lt-panel">
+    <div class="lt-head">
+      <div>
         <h3>从群里学说话</h3>
         <p class="muted">只读群消息，落在本机 <code>data/qq-learn</code>；一个群一条 JSONL，按星期自动结算。数据和这个群本身的配置都不出这台机器。</p>
       </div>
@@ -3950,7 +3966,31 @@ function learnPageHtml() {
 }
 
 async function openLearnPage() {
-  const { body } = pageShell('自学习', '按语境、人物、时间学一个群怎么说话：句长、语气词、省略主语、回复关系、情绪走势、内部梗。', learnPageHtml(), 'learn');
+  const { body } = pageShell('自学习', '量两件事：我自己怎么说话（网页打的字 + QQ 消息），和这群人怎么说话（群聊语料）。', learnPageHtml(), 'learn');
+  // 我自己怎么说话：单人语料，指标比群那套少，但多了「口头禅」这种只有一个人身上才成立的维度
+  const paintMe = async () => {
+    const host = body.querySelector('#ltMeBody');
+    const hint = body.querySelector('#ltMeHint');
+    const sw = body.querySelector('#ltMeInject');
+    if (!host) return;
+    const st = await api('/api/settings').catch(() => null);
+    if (sw && st) sw.checked = st.meInject === true;
+    const d = await api('/api/learn/me').catch((e) => ({ error: e.message }));
+    if (d.error) { host.innerHTML = `<p class="muted">读失败：${esc(d.error)}</p>`; return; }
+    if (d.empty) {
+      if (hint) hint.textContent = '';
+      host.innerHTML = `<p class="muted">${esc(d.hint || '还没有你自己发的消息。')}</p>`;
+      return;
+    }
+    if (hint) hint.textContent = `${d.count} 条 · ${d.days} 天 · ${d.convs} 段对话${d.images ? ` · ${d.images} 张图` : ''}`;
+    const tics = (d.phrases || []).map((p) => `<span class="lt-meme">${esc(p.phrase)} ×${p.count}</span>`).join('');
+    const openers = (d.openers || []).map((o) => `「${esc(o.word)}」${o.count}`).join('、');
+    const hours = (d.hours || []).join('、');
+    host.innerHTML = `<div class="lt-metrics">${(d.metrics || []).map((m) => learnMetric(m.k, m.v, m.h)).join('')}</div>`
+      + (tics ? `<div class="lt-memes"><span class="muted">常挂嘴边</span>${tics}</div>` : '')
+      + (openers ? `<p class="lt-note">习惯这样开头：${openers}</p>` : '')
+      + (hours ? `<p class="lt-note">常出没：${hours} 点</p>` : '');
+  };
   const paintGroups = async () => {
     const st = await api('/api/learn/status');
     LEARN.status = st;
@@ -3963,6 +4003,8 @@ async function openLearnPage() {
     const list = st.store || [];
     if (!list.length) {
       host.innerHTML = '<p class="muted">还没有群。先点「刷新群列表」，要保证隔离实例在线、那个号在群里。</p>';
+      const hint0 = body.querySelector('#ltHint');
+      if (hint0) hint0.textContent = '共 0 个群';
       return;
     }
     const wanted = new Set(st.wanted || []);
@@ -4055,6 +4097,10 @@ async function openLearnPage() {
       await api('/api/settings', { method: 'PUT', body: { learnInject: !!t.checked } }).catch((err) => toast(err.message));
       toast(t.checked ? '绑了群号的会话会带上这个群的画像' : '不再带画像');
     }
+    if (t.id === 'ltMeInject') {
+      await api('/api/settings', { method: 'PUT', body: { meInject: !!t.checked } }).catch((err) => toast(err.message));
+      toast(t.checked ? '每条对话都会带上你说话的画像' : '不再带你说话的画像');
+    }
   });
   body.addEventListener('click', async (e) => {
     const btn = e.target.closest('[data-x]');
@@ -4079,6 +4125,17 @@ async function openLearnPage() {
     }
     if (!btn) return;
     const act = btn.dataset.x;
+    if (act === 'ltMe') {
+      btn.disabled = true;
+      btn.textContent = '量着…';
+      try {
+        await api('/api/learn/me/refresh', { method: 'POST', body: {} });
+        await paintMe();
+        toast('重新量过了');
+      } catch (err) {
+        toast(`量失败：${err.message}`);
+      } finally { btn.disabled = false; btn.textContent = '重新量一遍'; }
+    }
     if (act === 'ltGroups') {
       btn.disabled = true;
       try {
@@ -4115,7 +4172,7 @@ async function openLearnPage() {
     }
   });
 
-  await paintGroups();
+  await Promise.all([paintMe(), paintGroups()]);
   const firstGid = LEARN.gid || ((LEARN.status && LEARN.status.store && LEARN.status.store[0] && LEARN.status.store[0].gid) || '');
   LEARN.gid = firstGid;
   if (firstGid) await paintAnalysis(firstGid);
