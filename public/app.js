@@ -2973,6 +2973,7 @@ function bindEvents() {
   $('#qqNavBtn').addEventListener('click', openQqPage);
   $('#pluginsBtn').addEventListener('click', openPluginsPage);
   $('#importNavBtn').addEventListener('click', openImportPage);
+  $('#skillsNavBtn').addEventListener('click', openSkillsPage);
   $('#pageBack').addEventListener('click', () => setView('chat'));
   $('#pageBackBtn').addEventListener('click', () => setView('chat'));
 
@@ -3215,7 +3216,7 @@ async function loadCalendarState() {
 /* ------------------------------------------------------------------ 整页视图 */
 
 const VIEW_TITLES = {
-  chat: '', day: '日历 · 时钟', qq: 'QQ 通道', plugins: '插件与通道', import: '导入对话', settings: '设置',
+  chat: '', day: '日历 · 时钟', qq: 'QQ 通道', plugins: '插件与通道', import: '导入对话', skills: '技能包', settings: '设置',
 };
 
 // 右下角吉祥物：点一下说句话，换页时让开
@@ -3250,7 +3251,7 @@ function setView(view) {
   S.view = view;
   $('#chatView').classList.toggle('hidden', view !== 'chat');
   $('#pageView').classList.toggle('hidden', view === 'chat');
-  for (const [id, v] of [['clockBtn', 'day'], ['qqNavBtn', 'qq'], ['pluginsBtn', 'plugins'], ['importNavBtn', 'import'], ['settingsBtn', 'settings']]) {
+  for (const [id, v] of [['clockBtn', 'day'], ['qqNavBtn', 'qq'], ['pluginsBtn', 'plugins'], ['importNavBtn', 'import'], ['skillsNavBtn', 'skills'], ['settingsBtn', 'settings']]) {
     $('#' + id)?.classList.toggle('on', view === v);
   }
   document.title = view === 'chat' ? 'DeepSeek Local' : `${VIEW_TITLES[view] || ''} · DeepSeek Local`;
@@ -3687,6 +3688,204 @@ async function openQqPage() {
     if (prev && DAY.qq) paintLive();
     else paintLive();
   }, 5000);
+}
+
+// ---------------- 技能包页面（拖进来就装）
+const SKILLS = { list: [], dir: '' };
+
+function skillRowHtml(s) {
+  const on = s.enabled ? 'checked' : '';
+  return `<div class="sk-row" data-id="${esc(s.id)}">
+    <label class="sk-main">
+      <input type="checkbox" class="sk-toggle" data-id="${esc(s.id)}" ${on}>
+      <span class="sk-text">
+        <span class="sk-name">${esc(s.name || s.id)}</span>
+        <span class="sk-desc">${esc(s.description || '（没写说明）')}</span>
+        <span class="sk-meta">${esc(s.id)} · ${s.chars || 0} 字${s.files ? ` · ${s.files} 个文件` : ''}</span>
+      </span>
+    </label>
+    <button class="btn ghost sk-del" data-x="skillDel" data-id="${esc(s.id)}" title="删掉这个技能">删除</button>
+  </div>`;
+}
+
+function skillsListHtml() {
+  if (!SKILLS.list.length) return '<div class="muted sk-empty">还没有技能。拖一个 SKILL.md 或 .zip 进来就装好了。</div>';
+  return SKILLS.list.map(skillRowHtml).join('');
+}
+
+async function loadSkills() {
+  try {
+    const j = await api('/api/skills');
+    SKILLS.list = Array.isArray(j.skills) ? j.skills : [];
+    SKILLS.dir = j.dir || '';
+  } catch {
+    SKILLS.list = [];
+  }
+  return SKILLS.list;
+}
+
+function skillsPageHtml() {
+  return `
+    <div class="imp">
+      <div class="imp-drop" id="skDrop">
+        <div class="imp-drop-ico">
+          <svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5A1.5 1.5 0 015.5 4H9l1.6 2H18.5A1.5 1.5 0 0120 7.5v11A1.5 1.5 0 0118.5 20h-13A1.5 1.5 0 014 18.5z"/><path d="M12 11v6"/><path d="M9 14h6"/></svg>
+        </div>
+        <b>把技能拖到这里</b>
+        <p>一个 <code>SKILL.md</code>、装它的整个文件夹、或者打成 <code>.zip</code> 都行 —— 装完自动勾上。</p>
+        <button class="btn" id="skPick">选择文件…</button>
+        <input type="file" id="skFile" class="hidden" multiple>
+      </div>
+      <div class="sk-list" id="skList">${skillsListHtml()}</div>
+      <div class="imp-tips">
+        <b>装好之后</b>
+        <ul>
+          <li><span class="k">装在哪</span>skills/&lt;id&gt;／，一个文件夹一个技能，主文件必须叫 SKILL.md</li>
+          <li><span class="k">怎么生效</span>勾上就每轮带一段 system；单技能最多 6000 字，超了截断</li>
+          <li><span class="k">跟回复风格什么关系</span>两回事：活人感管怎么说，技能管说什么</li>
+        </ul>
+        <p>限制：单文件 ≤ 2 MB、一个技能总共 ≤ 24 MB；只收文本类（.md / .txt / .json / .js / .py / .csv / .yaml 等）。删技能不会碰你的对话。</p>
+      </div>
+    </div>`;
+}
+
+/** 把拖进来的条目（可能是文件夹）摊平成 {file, rel} */
+async function walkSkillEntry(entry, prefix, out) {
+  if (!entry) return;
+  if (entry.isFile) {
+    const f = await new Promise((res, rej) => entry.file(res, rej));
+    out.push({ file: f, rel: (prefix || '') + entry.name });
+    return;
+  }
+  if (entry.isDirectory) {
+    const reader = entry.createReader();
+    for (;;) {
+      const batch = await new Promise(res => reader.readEntries(res, () => res([])));
+      if (!batch.length) break;
+      for (const en of batch) await walkSkillEntry(en, (prefix || '') + entry.name + '/', out);
+    }
+  }
+}
+
+async function postSkillBinary(file, name) {
+  const res = await fetch('/api/skills/upload?name=' + encodeURIComponent(name), {
+    method: 'POST',
+    headers: { 'content-type': 'application/octet-stream' },
+    body: file,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  return data;
+}
+
+async function uploadSkills(items) {
+  if (!items.length) return null;
+  if (items.length === 1) {
+    const it = items[0];
+    return postSkillBinary(it.file, it.rel.split('/').pop());
+  }
+  const fd = new FormData();
+  for (const it of items) fd.append('files', it.file, it.rel);
+  const res = await fetch('/api/skills/upload', { method: 'POST', body: fd });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  return data;
+}
+
+async function openSkillsPage() {
+  const { body } = pageShell('技能包', '拖进来就装好；勾上的技能每轮对话都会带上（和回复风格是两回事）。', skillsPageHtml(), 'skills');
+  const paint = () => {
+    const host = body.querySelector('#skList');
+    if (host) host.innerHTML = skillsListHtml();
+  };
+  await loadSkills();
+  paint();
+
+  const runUpload = async (items) => {
+    try {
+      toast('正在装…', 4000);
+      const r = await uploadSkills(items);
+      await loadSkills();
+      paint();
+      toast(r ? `装好了：${r.id}（${r.files} 个文件）` : '没东西可装');
+    } catch (e) {
+      toast('没装上：' + e.message, 5200);
+    }
+  };
+
+  const collectDrop = async (dt) => {
+    const entries = Array.from(dt.items || [])
+      .map(i => (i.webkitGetAsEntry ? i.webkitGetAsEntry() : null))
+      .filter(Boolean);
+    const out = [];
+    if (entries.length) for (const en of entries) await walkSkillEntry(en, '', out);
+    if (!out.length) for (const f of Array.from(dt.files || [])) out.push({ file: f, rel: f.name });
+    return out;
+  };
+
+  const dropEl = body.querySelector('#skDrop');
+  const onDrop = async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dropEl?.classList.remove('over');
+    if (!e.dataTransfer) return;
+    await runUpload(await collectDrop(e.dataTransfer));
+  };
+  const onOver = (e) => {
+    if (!e.dataTransfer) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = 'copy';
+  };
+  // 整页都接，别让全局拖放层抢
+  body.addEventListener('dragover', onOver);
+  body.addEventListener('drop', onDrop);
+  if (dropEl) {
+    dropEl.addEventListener('dragover', (e) => { onOver(e); dropEl.classList.add('over'); });
+    dropEl.addEventListener('dragleave', () => dropEl.classList.remove('over'));
+    dropEl.addEventListener('click', (e) => {
+      if (e.target.closest('#skPick')) return;
+      body.querySelector('#skFile')?.click();
+    });
+  }
+  body.querySelector('#skPick')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    body.querySelector('#skFile')?.click();
+  });
+  body.querySelector('#skFile')?.addEventListener('change', async (e) => {
+    const files = Array.from(e.target.files || []).map(f => ({ file: f, rel: f.webkitRelativePath || f.name }));
+    e.target.value = '';
+    await runUpload(files);
+  });
+
+  body.addEventListener('change', async (e) => {
+    const t = e.target.closest('.sk-toggle');
+    if (!t) return;
+    try {
+      await api('/api/skills/enable', { method: 'POST', body: { id: t.dataset.id, enabled: t.checked } });
+      await loadSkills();
+      paint();
+    } catch (err) {
+      toast('改不动：' + err.message);
+      await loadSkills();
+      paint();
+    }
+  });
+
+  body.addEventListener('click', async (e) => {
+    const x = e.target.closest('[data-x="skillDel"]');
+    if (!x) return;
+    const id = x.dataset.id;
+    if (!confirm(`删掉技能「${id}」？文件夹会从 skills/ 里删掉，对话不动。`)) return;
+    try {
+      await api('/api/skills/delete', { method: 'POST', body: { id } });
+      await loadSkills();
+      paint();
+      toast(`删掉了：${id}`);
+    } catch (err) {
+      toast('删不掉：' + err.message);
+    }
+  });
 }
 
 async function openPluginsPage() {

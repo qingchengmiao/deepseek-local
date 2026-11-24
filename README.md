@@ -561,7 +561,23 @@ pwsh -NoProfile -File tools\_run-fresh.ps1 -Tests qq-test,context-test,route-tes
 - 与回复风格无关：`native` 也照样注入技能，两件事互不影响。
 - 保存时按目录真实存在的 id 过滤，写 `../x` 之类的东西进不来。
 
-接口：`GET /api/skills` 返回 `{dir, skills:[{id,name,description,chars,file,enabled}]}`。
+接口：`GET /api/skills` 返回 `{dir, skills:[{id,name,description,chars,files,file,enabled}]}`。
+
+### 技能页：拖进来就装（2026-11-24 加）
+
+侧栏「技能」进去是一个拖放页，装完自动勾上：
+
+- 能拖什么：一个 `.md`／`.txt`（就当成 `SKILL.md`）、装了它的整个文件夹、或者 `.zip`（里面套一层文件夹也行）。
+- id 怎么定：传了 `id` 用它 → 主文件上层目录名（zip/文件夹）→ front matter 的 `name` → 文件名。中文名直接当目录名，重名自动加 `-2`、`-3`。
+- 页面级 `dragover`/`drop` 会 `stopPropagation`，不然会被全局拖放层抢走（那层只认「导入」和附件两种模式）。拖文件夹靠 `webkitGetAsEntry` 递归摊平，文件名带相对路径，服务端 `installSkillFiles` 按相对路径落盘。
+- 服务端写盘前查两道：`..` 段直接丢、扩展名得在 `SKILL_ALLOW_EXT` 里、单文件 ≤2 MB、一个技能 ≤24 MB；`skillDirOf()` 还会把 id `path.resolve` 之后核一遍必须在 `skills/` 里面。
+- 停用/启用走 `POST /api/skills/enable {id, enabled}`，删除走 `POST /api/skills/delete {id}`（只删 `skills/<id>`，删完从 `enabledSkills` 里剔掉）。删除**不动**对话。
+
+接口：`POST /api/skills {name?, id?, content}`（贴一段 SKILL.md 就能装）、`POST /api/skills/upload`（原始 body 或 multipart，query `?name=`）、`POST /api/skills/enable`、`POST /api/skills/delete`。
+
+验证：`node tools/skill-install-test.mjs`（30 项：JSON 直传、单 md、zip 含子目录、`__MACOSX` 垃圾、重名加后缀、非法扩展名 400、zip 里 `../` 不越界、启停、删除、`..` id 400、空内容 400）。截图 `data/shots/101-技能页.png`。
+
+注意：装进的是**app 自己那份** `skills/`（跑起来是 `resources\app\skills`）。以后如果拿仓库的 `dist` 整个覆盖过去，用户自装的技能会被换掉，要么先拷出来、要么把 `DSAPP_SKILLS` 指到一个固定目录。
 
 第一个真技能是 `skills/video-platform-voice`（视频平台语感），数字不是手写的，是从 `voice-video\gen_skill.py` 读 102 万条语料统计生成的：弹幕中位 6 字、78% 不带句末标点、语气词 3.04/100 字、各分区性格表、各平台对照，末尾写明「抖音/快手/西瓜没采到，别编」。
 

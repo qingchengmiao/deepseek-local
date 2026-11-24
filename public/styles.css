@@ -175,11 +175,11 @@ a:hover { text-decoration: underline; }
 .hit-list .hit mark { background: var(--mark); color: inherit; border-radius: 3px; padding: 0 1px; }
 
 .side-foot {
-  display: flex; gap: 4px; padding: 8px 10px 12px; border-top: 1px solid var(--border);
+  display: flex; flex-wrap: wrap; gap: 4px; padding: 8px 10px 12px; border-top: 1px solid var(--border);
 }
 .foot-btn {
-  flex: 1; display: flex; flex-direction: column; align-items: center; gap: 2px;
-  padding: 7px 2px; border-radius: 9px; color: var(--text-2); font-size: 11.5px;
+  flex: 1 1 28%; display: flex; flex-direction: column; align-items: center; gap: 2px;
+  padding: 7px 2px; border-radius: 9px; color: var(--text-2); font-size: 11.5px; white-space: nowrap;
 }
 .foot-btn:hover { background: var(--hover); color: var(--text); }
 
@@ -1186,3 +1186,16 @@ html[data-theme="dark"] .msg-actions { opacity: .42; }
 .hover-tip.on { opacity: 1; transform: none; }
 [data-theme="dark"] .hover-tip { background: #e9eaf0; color: #1c1d21; box-shadow: 0 10px 26px -14px rgb(0 0 0/.7), 0 2px 6px rgb(0 0 0/.3); }
 @media (prefers-reduced-motion: reduce) { .hover-tip { transition: none; } }
+
+/* ---------- 技能包页面 ---------- */
+.imp-drop.over { border-color: var(--primary); background: var(--primary-soft); transform: none; }
+.sk-list { display: flex; flex-direction: column; gap: 10px; margin-top: 14px; }
+.sk-empty { padding: 18px; border: 1px dashed var(--border); border-radius: 12px; text-align: center; font-size: 13px; }
+.sk-row { display: flex; align-items: flex-start; gap: 12px; border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; background: var(--bg-soft); }
+.sk-main { display: flex; align-items: flex-start; gap: 10px; flex: 1 1 auto; cursor: pointer; min-width: 0; }
+.sk-main input { margin: 2px 0 0; flex: 0 0 auto; }
+.sk-text { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.sk-name { font-size: 14px; font-weight: 600; }
+.sk-desc { font-size: 12.5px; line-height: 1.55; color: var(--text-2); }
+.sk-meta { font-size: 11.5px; color: var(--text-3); }
+.sk-del { flex: 0 0 auto; align-self: center; }

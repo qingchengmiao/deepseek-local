@@ -45,7 +45,7 @@ import {
   CONSOLIDATE_SYSTEM,
   consolidateUserPrompt,
 } from './context.mjs';
-import { organizeArchive, previewArchive, KIND_LABEL } from './archive.mjs';
+import { organizeArchive, previewArchive, KIND_LABEL, readZip } from './archive.mjs';
 import { readUrl as readLinkUrl, extractUrls, hasBrowser } from './fetchlink.mjs';
 import {
   dateStr as calDateStr,
@@ -303,11 +303,17 @@ function listSkills() {
       continue;
     }
     const meta = parseSkillMeta(text);
+    let files = 1;
+    try {
+      files = fs.readdirSync(path.join(SKILLS_DIR, id), { recursive: true })
+        .filter(n => fs.statSync(path.join(SKILLS_DIR, id, n)).isFile()).length;
+    } catch {}
     out.push({
       id,
       name: meta.name || id,
       description: meta.description || '',
       chars: meta.body.trim().length,
+      files,
       file,
     });
   }
@@ -335,6 +341,97 @@ function skillsPrompt(settings) {
   }
   return parts.length ? `以下是用户启用的技能，说话/写作时按它来（没触发就别硬套）：\n\n${parts.join('\n\n')}` : '';
 }
+
+// ---- 技能包安装：拖进来的 .md / .zip / 文件夹（多文件）都落到 skills/<id>/
+const SKILL_FILE_LIMIT = 2 * 1024 * 1024;      // 单个文件
+const SKILL_TOTAL_LIMIT = 24 * 1024 * 1024;    // 一个技能包总量
+const SKILL_ALLOW_EXT = new Set([
+  '.md', '.markdown', '.txt', '.json', '.jsonl', '.csv', '.yaml', '.yml',
+  '.js', '.mjs', '.cjs', '.py', '.sh', '.ps1',
+]);
+
+function skillSlug(raw) {
+  const s = String(raw || '').trim();
+  // 中文目录名也能用（只在 URL query 里出现过，客户端会 encodeURIComponent）
+  const ascii = s.replace(/\s+/g, '-').replace(/[^\p{Script=Han}a-zA-Z0-9_-]+/gu, '-').replace(/^-+|-+$/g, '');
+  if (ascii.length >= 2) return ascii.slice(0, 48);
+  return 'skill-' + crypto.createHash('sha1').update(s || String(Date.now())).digest('hex').slice(0, 8);
+}
+
+function skillDirOf(id) {
+  const root = path.resolve(SKILLS_DIR);
+  const dir = path.resolve(root, String(id || ''));
+  if (!dir.startsWith(root + path.sep)) throw new Error('技能目录不合法');
+  return dir;
+}
+
+/** 把一组文件写进 skills/<id>/：rel 用 / 分隔，SKILL.md 必须在里面 */
+function installSkillFiles(files, { id, name } = {}) {
+  let total = 0;
+  const clean = [];
+  for (const f of files) {
+    const rel = String(f.rel || f.filename || '').replace(/\\/g, '/').replace(/^\.\/+/, '');
+    if (!rel || rel.startsWith('/') || rel.split('/').includes('..')) continue;
+    if (!SKILL_ALLOW_EXT.has(path.extname(rel).toLowerCase())) continue;
+    const data = Buffer.isBuffer(f.data) ? f.data : Buffer.from(String(f.data ?? ''), 'utf8');
+    if (!data.length || data.length > SKILL_FILE_LIMIT) continue;
+    total += data.length;
+    if (total > SKILL_TOTAL_LIMIT) throw new Error('技能包太大（上限 24 MB）');
+    clean.push({ rel, data });
+  }
+  if (!clean.length) throw new Error('没找到可用的文本文件（支持 .md/.txt/.json/.js/.py/.sh 等）');
+
+  // 找 SKILL.md（大小写不敏感，取层级最浅的那个）
+  const mains = clean.filter(f => path.basename(f.rel).toLowerCase() === 'skill.md');
+  if (!mains.length) throw new Error('这个包里没有 SKILL.md——技能包的根目录里要有一个 SKILL.md');
+  mains.sort((a, b) => a.rel.split('/').length - b.rel.split('/').length);
+  const main = mains[0];
+  const prefix = main.rel.includes('/') ? main.rel.slice(0, main.rel.lastIndexOf('/') + 1) : '';
+
+  // id：显式给的 > SKILL.md 上层目录名 > front matter 的 name > 文件名
+  const text = main.data.toString('utf8');
+  const meta = parseSkillMeta(text);
+  const baseGuess = id || (prefix ? prefix.replace(/\/$/, '').split('/').pop() : '') || meta.name || name || '';
+  let finalId = skillSlug(baseGuess);
+  const used = new Set(listSkills().map(s => s.id));
+  if (used.has(finalId)) {
+    let n = 2;
+    while (used.has(`${finalId}-${n}`)) n += 1;
+    finalId = `${finalId}-${n}`;
+  }
+
+  const dir = skillDirOf(finalId);
+  fs.mkdirSync(dir, { recursive: true });
+  for (const f of clean) {
+    const rel = prefix && f.rel.startsWith(prefix) ? f.rel.slice(prefix.length) : f.rel;
+    if (!rel || rel.split('/').includes('..')) continue;
+    const dest = path.resolve(dir, rel);
+    if (!dest.startsWith(dir + path.sep)) continue;
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.writeFileSync(dest, f.data);
+  }
+  const written = fs.readdirSync(dir, { recursive: true }).filter(x => fs.statSync(path.join(dir, x)).isFile());
+  const saved = listSkills().find(s => s.id === finalId);
+  return { id: finalId, dir, files: written.length, skill: saved || null };
+}
+
+/** 一个上传体 → 技能文件：zip 就拆，纯文本就当 SKILL.md */
+function skillFilesFromUpload(buf, filename) {
+  const filename0 = String(filename || 'SKILL.md');
+  if (buf.length > SKILL_TOTAL_LIMIT) throw new Error('文件太大（上限 24 MB）');
+  if (buf.length >= 4 && buf[0] === 0x50 && buf[1] === 0x4b) {
+    const zip = readZip(buf);
+    const names = zip.names().filter(n => !n.split('/').includes('__MACOSX'));
+    return { files: names.map(n => ({ rel: n, data: zip.read(n) })), name: filename0 };
+  }
+  const ext = path.extname(filename0).toLowerCase();
+  if (!ext || ext === '.md' || ext === '.markdown' || ext === '.txt') {
+    // 单文件：本身就成为 SKILL.md，文件名（去掉扩展名）用来定 id
+    return { files: [{ rel: 'SKILL.md', data: buf }], name: path.basename(filename0, ext) };
+  }
+  throw new Error(`不认识的文件类型：${ext}（拖 .md 或 .zip，或者整个文件夹）`);
+}
+
 
 
 const DEFAULT_SETTINGS = {
@@ -4663,6 +4760,109 @@ async function handleApi(req, res, url) {
       dir: SKILLS_DIR,
       skills: listSkills().map(s => ({ ...s, file: s.file, enabled: enabled.has(s.id) })),
     });
+  }
+
+  // 粘贴一段 SKILL.md 就装：{ name?, id?, content }
+  if (pathname === '/api/skills' && method === 'POST') {
+    let body = null;
+    try {
+      body = await readBody(req, 8 * 1024 * 1024);
+    } catch (e) {
+      return sendJson(res, 400, { error: e.message });
+    }
+    const content = typeof body === 'object' && body ? String(body.content || '') : String(body || '');
+    if (!content.trim()) return sendJson(res, 400, { error: '内容是空的——把 SKILL.md 全文贴进来' });
+    if (content.length > SKILL_FILE_LIMIT) return sendJson(res, 400, { error: '单个技能文件上限 2 MB' });
+    let r;
+    try {
+      r = installSkillFiles([{ rel: 'SKILL.md', data: Buffer.from(content, 'utf8') }], {
+        id: body && body.id ? String(body.id) : '',
+        name: body && body.name ? String(body.name) : '',
+      });
+    } catch (e) {
+      return sendJson(res, 400, { error: e.message });
+    }
+    const settings = await loadSettings();
+    const arr = Array.isArray(settings.enabledSkills) ? settings.enabledSkills.slice() : [];
+    if (!arr.includes(r.id)) arr.push(r.id);
+    const next = await saveSettings({ enabledSkills: arr });
+    log(`技能装好：${r.id}（${r.files} 个文件）`);
+    return sendJson(res, 200, { ok: true, ...r, enabledSkills: next.enabledSkills });
+  }
+
+  // 拖文件：单 .md / .zip / 多文件（multipart，filename 里可以带相对路径）
+  if (pathname === '/api/skills/upload' && method === 'POST') {
+    const url = new URL(req.url, 'http://127.0.0.1');
+    let buf;
+    try {
+      buf = await readBodyBuffer(req, 64 * 1024 * 1024);
+    } catch (e) {
+      return sendJson(res, 400, { error: e.message });
+    }
+    if (!buf || !buf.length) return sendJson(res, 400, { error: '空文件' });
+    const ctype = String(req.headers['content-type'] || '');
+    let files = [];
+    let name = String(url.searchParams.get('name') || '');
+    try {
+      if (ctype.includes('multipart/form-data')) {
+        const parts = parseMultipart(buf, ctype);
+        files = parts.filter(p => p.filename).map(p => ({ rel: p.filename, data: p.data }));
+        if (!files.length) return sendJson(res, 400, { error: '没收到文件' });
+      } else {
+        const got = skillFilesFromUpload(buf, name || 'SKILL.md');
+        files = got.files;
+        name = got.name;
+      }
+    } catch (e) {
+      return sendJson(res, 400, { error: e.message });
+    }
+    let r;
+    try {
+      r = installSkillFiles(files, { name });
+    } catch (e) {
+      return sendJson(res, 400, { error: e.message });
+    }
+    const settings = await loadSettings();
+    const arr = Array.isArray(settings.enabledSkills) ? settings.enabledSkills.slice() : [];
+    if (!arr.includes(r.id)) arr.push(r.id);
+    const next = await saveSettings({ enabledSkills: arr });
+    log(`收到技能包：${name || '(未命名)'} → ${r.id}（${r.files} 个文件）`);
+    return sendJson(res, 200, { ok: true, ...r, enabledSkills: next.enabledSkills });
+  }
+
+  // 启用 / 停用
+  if (pathname === '/api/skills/enable' && method === 'POST') {
+    const body = (await readBody(req)) || {};
+    const id = String(body.id || '');
+    if (!listSkills().some(s => s.id === id)) return sendJson(res, 404, { error: `没有这个技能：${id}` });
+    const settings = await loadSettings();
+    const arr = new Set(Array.isArray(settings.enabledSkills) ? settings.enabledSkills : []);
+    if (body.enabled === false) arr.delete(id); else arr.add(id);
+    const next = await saveSettings({ enabledSkills: [...arr] });
+    return sendJson(res, 200, { ok: true, enabledSkills: next.enabledSkills });
+  }
+
+  // 删除（只动 skills/ 下面的目录）
+  if (pathname === '/api/skills/delete' && method === 'POST') {
+    const body = (await readBody(req)) || {};
+    const id = String(body.id || '');
+    let dir;
+    try {
+      dir = skillDirOf(id);
+    } catch (e) {
+      return sendJson(res, 400, { error: e.message });
+    }
+    if (!existsSync(path.join(dir, 'SKILL.md'))) return sendJson(res, 404, { error: `没有这个技能：${id}` });
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+    } catch (e) {
+      return sendJson(res, 500, { error: `删不掉：${e.message}` });
+    }
+    const settings = await loadSettings();
+    const arr = (Array.isArray(settings.enabledSkills) ? settings.enabledSkills : []).filter(x => x !== id);
+    const next = await saveSettings({ enabledSkills: arr });
+    log(`技能删掉：${id}`);
+    return sendJson(res, 200, { ok: true, id, enabledSkills: next.enabledSkills });
   }
 
   // ---------------- 日历
