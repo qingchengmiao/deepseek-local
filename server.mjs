@@ -65,6 +65,7 @@ import { qqConfig, onebot, loginInfo, sendPrivate, sendGroup, friendHistory, gro
 import { createLearnService } from './learn-service.mjs';
 import { createUserLearnService, buildOwnProfileText } from './user-learn.mjs';
 import { createVectorIndex } from './vector-index.mjs';
+import { createSelfTune, parseTuneBlock, stripTuneBlock, TUNE_INSTRUCTION } from './self-tune.mjs';
 import { isoWeek } from './qqgroup.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -578,6 +579,7 @@ const DEFAULT_SETTINGS = {
   // ---- 用户对话学习：从「我自己说过的话」里量说话样子（网页打的字 + QQ 发来的消息）
   meInject: false, // 打开后，每条请求会带上「对方平时怎么说话」的画像
   meMax: 400, // 画像注入的字数上限
+  selfTune: true, // 打开后，模型可以在回答里带一个调整块，自己改温度/说话口径（可撤回）
 };
 
 // ---------------------------------------------------------------- 小工具
@@ -856,6 +858,7 @@ async function saveSettings(patch) {
     else if (k === 'learnLastSettledWeek') next.learnLastSettledWeek = String(v || '').slice(0, 20);
     else if (k === 'meInject') next.meInject = v === true;
     else if (k === 'meMax') next.meMax = Math.max(100, Math.min(2000, Math.floor(Number(v) || 400)));
+    else if (k === 'selfTune') next.selfTune = v !== false;
     else if (typeof v === 'boolean') next[k] = v;
     else next[k] = v;
   }
@@ -1110,6 +1113,11 @@ const userLearn = createUserLearnService({
     return out;
   },
 });
+
+// 自我调整：模型可以在回答末尾留一个 ```tune 块，改自己以后怎么说话（温度 + 追加提示）。
+// 与 adaptiveTune 的区别：那个是这一轮现算现用，这个要跨轮跨会话留住，并且能撤回。
+const selfTune = createSelfTune({ dataDir: DATA });
+
 async function qqStatus() {
   const settings = await loadSettings();
   const cfg = effQqConfig(settings);
@@ -4167,7 +4175,13 @@ async function buildMessages(conv, settings, { withTools = false } = {}) {
   if (style === 'human' || style === 'qq') styleParts.push(HUMAN_STYLE_PROMPT);
   if (style === 'qq' && settings.qqStyle !== false) styleParts.push(QQ_VOICE_PROMPT);
   if (style !== 'native' && settings.antiBaGu !== false) styleParts.push(ANTI_BA_GOO_PROMPT);
-  const systemPrompt = [...styleParts, ownPrompt].filter(Boolean).join('\n\n');
+  // 自我调整：模型自己攒下来的口径，排在风格之后、用户自定义提示之前
+  const selfTuneText = settings.selfTune === false ? '' : selfTune.promptFor(style);
+  if (selfTuneText) {
+    styleParts.push(selfTuneText);
+    meta.selfTune = { chars: selfTuneText.length };
+  }
+  const systemPrompt = [...styleParts, settings.selfTune === false ? '' : TUNE_INSTRUCTION, ownPrompt].filter(Boolean).join('\n\n');
   if (systemPrompt) out.push({ role: 'system', content: systemPrompt });
   if (style) meta.style = style;
 
@@ -4668,6 +4682,9 @@ async function handleChat(req, res, presetBody) {
   // ---- 组装请求（自动压缩 + 向量检索 + 时间衰减都在这里发生）
   // 每个会话可以有自己的上下文参数（conv.ctx 覆盖全局 settings）
   const ctxSettings = ctxSettingsFor(conv, settings);
+  // 自我调整：模型自己定过的温度盖过全局设置（自适应那一层稍后会把它当基准）
+  const selfTuneTemp = settings.selfTune === false ? null : selfTune.summary().temp;
+  if (selfTuneTemp != null) ctxSettings.temperature = selfTuneTemp;
   const built = await buildMessages(conv, ctxSettings, { withTools });
   const tBuilt = Date.now();
   let ctx = built.messages;
@@ -4690,6 +4707,12 @@ async function handleChat(req, res, presetBody) {
     memPending: !!ctxMeta.memoryPending,
     attachments: lastMsgAtts,
   });
+  // 模型自己定过温度就按它的来：自适应那层只是「按这一轮内容猜」，猜不过模型自己的判断
+  if (selfTuneTemp != null) {
+    tune.temperature = selfTuneTemp;
+    tune.base = selfTuneTemp;
+    if (tune.on) tune.label = `${tune.label || ''}·自我调整`.replace(/^·/, '');
+  }
   ctxMeta.tune = { on: !!tune.on, temperature: tune.temperature, base: tune.base, label: tune.label || '', tags: tune.tags || [] };
   if (tune.on && tune.prompt) {
     ctxMeta.tune.applied = true;
@@ -4838,7 +4861,7 @@ async function handleChat(req, res, presetBody) {
   if (safetyLevel !== 'off') payload.safety_check = { level: safetyLevel };
   if (upstreamTitle) payload.title = { enabled: true };
   const samplingAllowed = !withTools && safetyLevel === 'off' && !upstreamTitle;
-  if (samplingAllowed) payload.temperature = typeof body.temperature === 'number' ? body.temperature : (ctxMeta.tune?.on ? ctxMeta.tune.temperature : settings.temperature);
+  if (samplingAllowed) payload.temperature = typeof body.temperature === 'number' ? body.temperature : (ctxMeta.tune?.on ? ctxMeta.tune.temperature : (Number.isFinite(Number(ctxSettings.temperature)) ? Number(ctxSettings.temperature) : settings.temperature));
 
   const { chat, betaChat } = apiEndpoints(settings.baseUrl);
   const endpoint = mode === 'continue' ? betaChat : chat;
@@ -4976,6 +4999,21 @@ async function handleChat(req, res, presetBody) {
     if (!ac.signal.aborted) upstreamError = upstreamError || e.message;
   }
 
+  // ---- 自我调整：模型在回答末尾留的 ```tune 块不给人看，落盘后从正文里剥掉
+  let tuneApplied = null;
+  if (contentText && settings.selfTune !== false) {
+    const patch = parseTuneBlock(contentText);
+    if (patch) {
+      const r = selfTune.apply(patch, { by: 'model', why: patch.why });
+      if (r.ok) {
+        tuneApplied = r.applied;
+        contentText = stripTuneBlock(contentText);
+        ctxMeta.selfTune = { ...(ctxMeta.selfTune || {}), applied: tuneApplied };
+        log(`自我调整（模型自己改的）：${Object.keys(tuneApplied).join('+')}${patch.why ? ` · ${patch.why}` : ''}`);
+      }
+    }
+  }
+
   // ---- 落盘
   const durationMs = now() - startedAt;
   const fullContent = (mode === 'continue' ? continueBase : '') + contentText;
@@ -4992,6 +5030,7 @@ async function handleChat(req, res, presetBody) {
   if (thinking) assistant.thinking = { enabled: true, effort };
   if (withTools) assistant.tools = tools.map(t => t.type);
   if (ctxMeta.tune?.on) assistant.tune = { temperature: ctxMeta.tune.temperature, base: ctxMeta.tune.base, label: ctxMeta.tune.label, tags: ctxMeta.tune.tags };
+  if (tuneApplied) assistant.selfTune = tuneApplied;
 
   if (title) {
     conv.title = String(title).slice(0, 100);
@@ -5558,6 +5597,49 @@ async function handleApi(req, res, url) {
     } catch (e) {
       return sendJson(res, 400, { error: e.message });
     }
+  }
+
+  // ---------------- 自我调整：模型自己改温度 / 说话口径，跨轮保留、可撤回
+  if (pathname === '/api/self-tune' && method === 'GET') {
+    const settings = await loadSettings();
+    return sendJson(res, 200, { ...selfTune.summary(), enabled: settings.selfTune !== false });
+  }
+  if (pathname === '/api/self-tune' && method === 'POST') {
+    let body = null;
+    try {
+      body = await readBody(req);
+    } catch (e) {
+      return sendJson(res, 400, { error: e.message });
+    }
+    if (!body || typeof body !== 'object') return sendJson(res, 400, { error: '缺少请求体' });
+    const patch = {
+      temp: body.temperature != null && body.temperature !== '' ? Number(body.temperature) : undefined,
+      addendum: typeof body.addendum === 'string' ? body.addendum : undefined,
+      scope: body.scope ? String(body.scope) : undefined,
+      replace: body.replace === true,
+      why: body.why ? String(body.why) : '',
+    };
+    const r = selfTune.apply(patch, { by: 'user', why: patch.why });
+    if (!r.ok) return sendJson(res, 400, { error: r.error || '没有可应用的改动' });
+    log(`自我调整（你手动改的）：${Object.keys(r.applied || {}).join('+')}`);
+    return sendJson(res, 200, { ok: true, applied: r.applied, ...selfTune.summary() });
+  }
+  if (pathname === '/api/self-tune/revert' && method === 'POST') {
+    let body = null;
+    try {
+      body = await readBody(req);
+    } catch (e) {
+      body = null;
+    }
+    const r = selfTune.revert(body && body.id != null ? body.id : undefined);
+    if (!r.ok) return sendJson(res, 400, { error: r.error || '没有可撤回的改动' });
+    log('自我调整：撤回了一条');
+    return sendJson(res, 200, { ok: true, ...selfTune.summary() });
+  }
+  if (pathname === '/api/self-tune/reset' && method === 'POST') {
+    selfTune.reset();
+    log('自我调整：清空了');
+    return sendJson(res, 200, { ok: true, ...selfTune.summary() });
   }
 
   // ---------------- 技能包（skills/<id>/SKILL.md）

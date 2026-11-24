@@ -1664,6 +1664,22 @@ async function openSettings() {
     ? `本机 ollama 在线：${local.chat.length} 个对话模型、${local.embed.length} 个向量模型，自动选 ${local.pick || '—'}。`
     : '本机 ollama 没连上（127.0.0.1:11434）：压缩会退回 API，装了 ollama 再点「测一下」。';
 
+  // 自我调整：模型自己调过的温度与口径（落在 data/self-tune.json）
+  let st = { temp: null, addendum: { global: '', human: '', qq: '' }, history: [], enabled: true, active: false };
+  try { st = { ...st, ...(await api('/api/self-tune')) }; } catch {}
+  const stWhen = (ms) => {
+    if (!ms) return '';
+    const d = new Date(ms);
+    const p = (n) => String(n).padStart(2, '0');
+    return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  };
+  const stHistHtml = () => {
+    const rows = (st.history || []).slice().reverse();
+    if (!rows.length) return '<div class="desc">还没有调整记录。</div>';
+    return rows.map((h) => `<div class="st-row"><span class="st-who">${h.by === 'model' ? '模型' : '你'}</span><span class="st-at">${esc(stWhen(h.at))}</span><span class="st-why">${esc(h.why || '没说原因')}</span><button class="btn ghost st-back" data-st="${esc(h.id)}">撤回</button></div>`).join('');
+  };
+  const stNow = () => (st.temp == null ? '没定（跟设置里的温度走）' : `模型定的 ${Number(st.temp)}`);
+
   const { body, close } = pageShell('设置', 'Key 只保存在本机 data/settings.json，不会上传到任何地方。', `
     <div class="settings-top">
       <button class="btn" id="setImport" title="支持 DeepSeek 导出包 / JSON 整包 / 任意资料压缩包">导入对话或压缩包</button>
@@ -1773,6 +1789,53 @@ async function openSettings() {
         <div class="desc">每一轮看你的问法和对话状态：代码/计算降温度、创作抬温度、长对话提醒别复述、短问别客套。只影响这一轮，不改你上面设的温度。回答顶部会标一个「自适应 · 温度 x」。</div>
       </div>
       <input type="checkbox" id="setAdaptiveTurn" ${fresh.adaptiveTurn !== false ? 'checked' : ''}>
+    </div>
+
+    <div class="modal-sep">
+      <div class="lbl">自我调整</div>
+      <div class="desc">「按对话自动调」只影响当轮、算完就扔。这一块是反过来：模型自己决定「以后都该这么说」，温度或口径改了就落盘，跨对话一直生效，随时能撤回。</div>
+    </div>
+
+    <div class="switch-row">
+      <div>
+        <div class="lbl">允许模型自己调</div>
+        <div class="desc">开着才会告诉它「你可以调」；关掉后既不注入已经调好的口径，也不接受新的调整块</div>
+      </div>
+      <input type="checkbox" id="setSelfTune" ${fresh.selfTune !== false ? 'checked' : ''}>
+    </div>
+
+    <div class="field">
+      <label>模型定的温度</label>
+      <div class="row">
+        <input type="number" id="stTemp" min="0" max="2" step="0.05" placeholder="留空 = 不覆盖" value="${st.temp == null ? '' : Number(st.temp)}">
+        <span class="tip" id="stTempNow">现在是：${esc(stNow())}</span>
+      </div>
+      <div class="tip">填了就用它，比上面「温度」和自适应那层都优先。留空保存 = 取消覆盖。</div>
+    </div>
+
+    <div class="field">
+      <label>长期口径 · 网页对话</label>
+      <textarea id="stHuman" placeholder="例：先给结论，再给依据，别写铺垫。">${esc(st.addendum.human || '')}</textarea>
+    </div>
+
+    <div class="field">
+      <label>长期口径 · QQ</label>
+      <textarea id="stQq" placeholder="例：短句，一条说完，别分点。">${esc(st.addendum.qq || '')}</textarea>
+    </div>
+
+    <div class="field">
+      <label>长期口径 · 所有对话</label>
+      <textarea id="stGlobal" placeholder="例：不要用「不是…而是…」这种句式。">${esc(st.addendum.global || '')}</textarea>
+      <div class="row" style="margin-top:8px">
+        <button class="btn" id="stSave">写进去</button>
+        <button class="btn ghost" id="stReset">全部清掉</button>
+        <span class="tip">空着的档 = 那档没有额外口径。</span>
+      </div>
+    </div>
+
+    <div class="field">
+      <label>改动记录（撤回就回到那次之前）</label>
+      <div id="stHist" class="st-hist">${stHistHtml()}</div>
     </div>
 
     <div class="field">
@@ -2157,7 +2220,74 @@ async function openSettings() {
     }
   });
 
-  // 这一页所有控件的当前值（Key 单独取，空表示不改）
+  /* 自我调整：模型定的温度与长期口径（落 data/self-tune.json，不进 settings） */
+  const stPaint = () => {
+    const hist = body.querySelector('#stHist');
+    if (hist) hist.innerHTML = stHistHtml();
+    const now = body.querySelector('#stTempNow');
+    if (now) now.textContent = '现在是：' + stNow();
+    const temp = body.querySelector('#stTemp');
+    if (temp) temp.value = st.temp == null ? '' : String(Number(st.temp));
+    for (const [id, key] of [['stHuman', 'human'], ['stQq', 'qq'], ['stGlobal', 'global']]) {
+      const el = body.querySelector('#' + id);
+      if (el) el.value = st.addendum[key] || '';
+    }
+  };
+  const stReload = async () => {
+    try { st = { ...st, ...(await api('/api/self-tune')) }; } catch {}
+    stPaint();
+  };
+
+  const stSave = body.querySelector('#stSave');
+  if (stSave) stSave.addEventListener('click', async () => {
+    const raw = (body.querySelector('#stTemp').value || '').trim();
+    const payload = {
+      temperature: raw === '' ? null : Number(raw),
+      addendum: {
+        human: body.querySelector('#stHuman').value,
+        qq: body.querySelector('#stQq').value,
+        global: body.querySelector('#stGlobal').value,
+      },
+      why: '设置页手改',
+    };
+    stSave.disabled = true;
+    try {
+      await api('/api/self-tune', { method: 'POST', body: payload });
+      await stReload();
+      toast('自我调整已写入');
+    } catch (err) {
+      toast('写入失败：' + err.message);
+    } finally {
+      stSave.disabled = false;
+    }
+  });
+
+  const stReset = body.querySelector('#stReset');
+  if (stReset) stReset.addEventListener('click', async () => {
+    if (!confirm('把自我调整全部清掉？温度回到设置里的值，三档口径都删。')) return;
+    try {
+      await api('/api/self-tune/reset', { method: 'POST', body: {} });
+      await stReload();
+      toast('已全部清掉');
+    } catch (err) { toast('清掉失败：' + err.message); }
+  });
+
+  const stHist = body.querySelector('#stHist');
+  if (stHist) stHist.addEventListener('click', async e => {
+    const b = e.target.closest('[data-st]');
+    if (!b) return;
+    b.disabled = true;
+    try {
+      await api('/api/self-tune/revert', { method: 'POST', body: { id: b.dataset.st } });
+      await stReload();
+      toast('已撤回');
+    } catch (err) {
+      b.disabled = false;
+      toast('撤回失败：' + err.message);
+    }
+  });
+
+
   const readPatch = () => ({
       baseUrl: body.querySelector('#setBase').value.trim() || 'https://api.deepseek.com',
       model: body.querySelector('#setModel').value,
@@ -2171,6 +2301,7 @@ async function openSettings() {
         hybridMode: body.querySelector('#setHybridMode').checked,
         mediaTwoStage: body.querySelector('#setMediaTwoStage').checked,
       adaptiveTurn: body.querySelector('#setAdaptiveTurn').checked,
+      selfTune: body.querySelector('#setSelfTune').checked,
       routeChatModel: body.querySelector('#setRouteChat').value,
       routeThinkModel: body.querySelector('#setRouteThink').value,
       routeHybridDraftModel: body.querySelector('#setRouteHybridDraft').value,

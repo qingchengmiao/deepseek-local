@@ -794,3 +794,17 @@ node tools/shot-bigconv.mjs "http://127.0.0.1:8787" "c_perfbig1"
 - `context.mjs` 的 `MEMORY_SYSTEM` / `CONSOLIDATE_SYSTEM` 换成便条式：第一行固定「这份便条可以被推翻，以眼前证据为准」；证据分两级（能指到工具输出/文件/行号写「已验证：」，只是推断写「⚠️ 未验证：」）；专门留一节「未完成与待验证」记没做成的；旧结论被推翻要注明。
 - 惊讶度闸门：新便条和旧便条二元组重合度太高（`memoryNovelty < 0.12`）时不重写记忆，只推进覆盖范围（`upTo`），省一次写入也不会把旧结论洗掉。
 - 归档区间回取本来就有：`POST /api/conversations/<id>/context/activate { from, to }` 可以把任意一段（含已归档的）原文重新拉回上下文。
+
+## 自我调整：模型自己改自己的温度和口径（2026-11-25 加）
+
+- 和「按对话自动调」不是一回事。自动调是每轮现算、用完就扔；自我调整是模型自己决定「以后都这么说」，落盘、跨轮跨会话生效、随时能撤回。
+- 模型怎么改：回答末尾单独加一块（只在它真觉得该长期改时加）
+
+  ```tune {"temperature":0.8,"addendum":"先给结论，再给依据，别铺垫","scope":"human","why":"这轮被嫌啰嗦"}```
+
+  服务端在落库前把块解析掉、从正文里删掉，正文干净、库里也只留干净的那份。`scope` 取 `human`（网页）/ `qq`（QQ 会话）/ `global`（都要），温度 0–2。
+- 存在的哪：`data/self-tune.json`，结构 `{version, temp, addendum:{global,human,qq}, history:[...]}`；每次改动把旧值压进 history（最多 30 条），`revert` 能给 id 也能给下标、不给就回退最近一次。
+- 生效方式：`buildMessages` 把 `promptFor(style)` 拼进开头 system（带固定抬头「这些是你自己之前决定要改的」）；温度作为 `adaptiveTune` 的底座，模型定过的优先，自动那层只在没定时生效。
+- 关掉：设置页「允许模型自己调」取消勾选（`settings.selfTune=false`）→ 既不注入指令、也不再接受新的调整块，已经定下的口径也不再注入。
+- 接口：`GET /api/self-tune`（当前温度/三档口径/历史/enabled）、`POST /api/self-tune`（`{temperature, addendum:{human,qq,global}, why}`，`temperature:null` = 取消覆盖，空串 = 清掉那档）、`POST /api/self-tune/revert {id}`、`POST /api/self-tune/reset`。
+- 测试：`cd deepseek-app; node tools/self-tune-test.mjs`（24 项，假上游必须回 SSE —— server 是按 `\n\n` 切块读 `choices[0].delta.content` 的，回一次性 JSON 会正文为空）。截图：`node tools/shot-selftune.mjs`。
