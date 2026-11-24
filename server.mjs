@@ -6614,9 +6614,12 @@ async function serveStatic(req, res, pathname) {
     const stat = await fsp.stat(file);
     if (!stat.isFile()) throw new Error('not file');
     const ext = path.extname(file).toLowerCase();
+    // 本机自用、单进程，静态资源一律 no-cache：以前 .js/.css 给的是 max-age=300，
+    // 结果改了前端、重启服务后窗口里跑的还是旧脚本（报的错在磁盘上已经不存在了）。
+    // 让浏览器每次都回来问一句，代价是几百 KB 的本地请求，换来「刷新就是最新」。
     const headers = {
       'Content-Type': MIME[ext] || 'application/octet-stream',
-      'Cache-Control': ext === '.html' ? 'no-cache' : 'public, max-age=300',
+      'Cache-Control': 'no-cache',
       'Content-Length': stat.size,
     };
     res.writeHead(200, headers);
