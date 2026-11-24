@@ -777,6 +777,31 @@ function renderMessages() {
   updateTopbar();
 }
 
+/** 尾巴对齐：别的通道（QQ / 另一个窗口）往这个会话里塞了新消息，页面上得自己长出来。
+ *  只问「一共几条」，真变多了才拉那一小段；不在前台 / 正在流式 / 没有会话都不问。 */
+let tailBusy = false;
+async function syncTail() {
+  if (tailBusy || !S.conv || S.streaming) return;
+  if (document.visibilityState !== 'visible') return;
+  tailBusy = true;
+  try {
+    const probe = await api(`/api/conversations/${S.conv.id}/messages?count=1`);
+    const total = Number(probe.total) || 0;
+    const local = S.convTotal || S.conv.messages.length;
+    if (total <= local) return;
+    const want = Math.min(60, total - local);
+    const data = await api(`/api/conversations/${S.conv.id}/messages?count=${want}`);
+    const got = (data.messages || []).filter(m => m && m.id && !S.conv.messages.some(x => x.id === m.id));
+    if (!got.length) { S.convTotal = total; return; }
+    const stick = nearBottom();
+    S.conv.messages.push(...got);
+    S.convTotal = total;
+    renderMessages();
+    if (stick) scrollToBottom(true);
+  } catch { /* 同步失败不打扰 */ }
+  finally { tailBusy = false; }
+}
+
 /** 往前翻一页：找服务端把 [convFrom-60, convFrom) 拿下来，接在本地数组前面 */
 async function loadEarlier() {
   if (!S.conv || !(S.convFrom > 0)) return;
@@ -3304,6 +3329,7 @@ function tickClockMini() {
   if (btn) btn.title = `${day} ${hhmm} · 日历 · 时钟 · QQ`;
 }
 setInterval(tickClockMini, 15000);
+setInterval(syncTail, 2000);
 
 async function loadCalendarState() {
   DAY.cal = await api('/api/calendar');

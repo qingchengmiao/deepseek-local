@@ -60,7 +60,7 @@ import {
   patchEvent,
   scheduleText,
 } from './calendar.mjs';
-import { qqConfig, onebot, loginInfo, sendPrivate, sendGroup, friendHistory, groupHistory, pickNew, qqUserPrompt } from './qq.mjs';
+import { qqConfig, onebot, loginInfo, sendPrivate, sendGroup, friendHistory, groupHistory, pickNew, qqUserPrompt, eventToItem } from './qq.mjs';
 import { createLearnService } from './learn-service.mjs';
 import { createUserLearnService, buildOwnProfileText } from './user-learn.mjs';
 import { isoWeek } from './qqgroup.mjs';
@@ -548,7 +548,7 @@ const DEFAULT_SETTINGS = {
   qqToken: '',
   qqUid: '', // 私聊 QQ 号
   qqGroup: '', // 群号（填了就往群里发）
-  qqPollMs: 5000,
+  qqPollMs: 2000,   // 事件通道断了才靠它兜底，所以贴着下限跑
   qqConvId: '', // 收进来的消息接到哪个会话；空 = 自动建一个「QQ」
   qqCallName: '对方',
   qqStyle: true, // QQ 回话按真人语料那套口径说（关掉就只剩通用的活人感提示）
@@ -1055,6 +1055,10 @@ async function qqStatus() {
     sent: qqState.sent,
     seen: qqState.seen.length,
     recent: qqState.recent.slice(-20),
+    events: {
+      on: qqEvents.started, connected: qqEvents.connected,
+      got: qqEvents.got, lastAt: qqEvents.lastEventAt, error: qqEvents.lastError,
+    },
   };
 }
 
@@ -1303,6 +1307,13 @@ async function qqPollOnce({ reply = true } = {}) {
       return { skipped: 'warm-start', history: list.length };
     }
   }
+  return qqProcessItems(list, { reply, settings, cfg });
+}
+
+/** 收到一批「对方发来的」消息后的统一处理：去重 → 记 seen → 只发不回就只记库 → 否则一条一回。
+ *  轮询（qqPollOnce）和事件推送（WS）走同一条路，保证延迟不同但行为一致。 */
+async function qqProcessItems(list, { reply = true, settings, cfg } = {}) {
+  const t0 = now();
   const { fresh, seen } = pickNew(list, qqState.seen);
   if (seen.length !== qqState.seen.length) {
     qqState.seen = seen;
@@ -1972,6 +1983,7 @@ async function channelsState() {
       convId: settings.qqConvId, pollMs: settings.qqPollMs,
       napcat: napcat ? { exists: napcat.exists, portOpen: napcat.portOpen, login: napcat.login } : null,
       received: qqState.received, sent: qqState.sent,
+      events: { on: qqEvents.started, connected: qqEvents.connected, got: qqEvents.got, lastAt: qqEvents.lastEventAt, error: qqEvents.lastError },
     },
     calendar: { events: (cal.events || []).length, today: (cal.events || []).filter(e => e.date === calDateStr() && !e.done).length, inContext: settings.calendarInContext !== false, days: settings.calendarDays },
     link: { local: settings.readLinkLocal !== false, mode: settings.readLinkMode, browser: !!hasBrowser() },
@@ -1979,6 +1991,93 @@ async function channelsState() {
     ctx: { compress: settings.ctxCompress !== false, rag: settings.ctxRag !== false, budget: settings.ctxBudget, summarizer: settings.ctxSummarizer, archive: settings.ctxArchive !== false },
     local,
   };
+}
+
+// ---------------------------------------------------------------- QQ 事件推送（正向 WS）
+// 轮询最快也要等一轮（默认 2-5 秒），还白打 HTTP；NapCat 自带 OneBot 正向 WS，
+// 消息一进来就推。这里连上去走同一条处理路径（qqProcessItems），
+// 轮询退化成兜底：断线、漏事件时补一下，不影响幂等（seen 去重）。
+const qqEvents = {
+  started: false, connected: false, ws: null, timer: null, retry: 0,
+  got: 0, lastEventAt: 0, lastError: '', queue: Promise.resolve(),
+};
+
+function qqEventMatches(cfg, item) {
+  if (cfg.group) return item.groupId === String(cfg.group);
+  return !!cfg.uid && item.uid === String(cfg.uid);
+}
+
+function startQqEvents() {
+  if (qqEvents.started) return;
+  qqEvents.started = true;
+
+  const schedule = (ms) => {
+    if (qqEvents.timer) clearTimeout(qqEvents.timer);
+    qqEvents.timer = setTimeout(() => { connect().catch(() => {}); }, ms);
+  };
+
+  const connect = async () => {
+    if (!qqEvents.started) return;
+    if (qqEvents.ws) { try { qqEvents.ws.close(); } catch {} qqEvents.ws = null; }
+    const settings = await loadSettings().catch(() => ({}));
+    const cfg = effQqConfig(settings);
+    if (cfg.mode === 'off') { schedule(5000); return; }
+    const port = Number(settings.napcatWsPort) || 3201;
+    let ws;
+    try {
+      ws = new WebSocket(`ws://127.0.0.1:${port}`);
+    } catch (e) {
+      qqEvents.lastError = '事件通道建连失败：' + e.message;
+      schedule(8000);
+      return;
+    }
+    qqEvents.ws = ws;
+    ws.addEventListener('open', () => {
+      qqEvents.connected = true;
+      qqEvents.retry = 0;
+      qqEvents.lastError = '';
+      log('QQ 事件通道已连上', `ws://127.0.0.1:${port}`);
+    });
+    ws.addEventListener('message', (e) => {
+      const raw = typeof e.data === 'string' ? e.data : '';
+      if (!raw) return;
+      let ev;
+      try { ev = JSON.parse(raw); } catch { return; }
+      const item = eventToItem(ev);
+      if (!item || !item.messageId) return;
+      const me = qqState.info?.uid || '';
+      if (me && item.uid === me) return;
+      // 串行：同一个会话两条并发会把消息顺序搞乱
+      qqEvents.queue = qqEvents.queue.then(async () => {
+        const s2 = await loadSettings();
+        const c2 = effQqConfig(s2);
+        if (c2.mode === 'off' || !qqEventMatches(c2, item)) return;
+        qqEvents.got += 1;
+        qqEvents.lastEventAt = now();
+        await qqProcessItems([item], { reply: c2.mode === 'both', settings: s2, cfg: c2 });
+      }).catch((err) => {
+        qqEvents.lastError = '事件处理失败：' + ((err && err.message) || err);
+      });
+    });
+    ws.addEventListener('close', () => {
+      qqEvents.connected = false;
+      if (!qqEvents.started) return;
+      qqEvents.retry += 1;
+      schedule(Math.min(15000, 1000 * (2 ** Math.min(4, qqEvents.retry))));
+    });
+    ws.addEventListener('error', () => { qqEvents.lastError = 'ws 连接错误'; });
+  };
+
+  connect().catch(() => {});
+}
+
+function stopQqEvents() {
+  qqEvents.started = false;
+  if (qqEvents.timer) clearTimeout(qqEvents.timer);
+  qqEvents.timer = null;
+  try { qqEvents.ws?.close(); } catch {}
+  qqEvents.ws = null;
+  qqEvents.connected = false;
 }
 
 function startQQBridge() {
@@ -5640,7 +5739,8 @@ async function handleApi(req, res, url) {
     }
     sendJson(res, 200, { ok: true, pid: process.pid });
     log('收到关闭请求，正在退出。');
-    stopQQBridge();
+stopQQBridge();
+  stopQqEvents();
     setTimeout(async () => {
       try { await fsp.unlink(RUNTIME_FILE); } catch {}
       process.exit(0);
@@ -6325,13 +6425,15 @@ async function main() {
     if (!ok) log('没找到 Edge/Chrome，改成用默认浏览器打开。');
   } else if (argv.includes('--open')) openBrowser(url);
 
-  startQQBridge();
+startQQBridge();
+startQqEvents();
   startHealLoop(); // 隔离实例的自动纠错（90 秒一轮，设置里 napcatAutoHeal 可关）
   startLearnLoop(); // 群聊自学习：10 分钟抽一轮、跨周自动结算（设置里 learnAuto 可关）
 
   const shutdown = async () => {
     log('正在关闭…');
-    stopQQBridge();
+stopQQBridge();
+  stopQqEvents();
     stopLearnLoop();
     server.close();
     try { await fsp.unlink(RUNTIME_FILE); } catch {}

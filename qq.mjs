@@ -129,3 +129,21 @@ export function qqUserPrompt(item, { callName = '对方' } = {}) {
   const who = item.groupId ? `QQ 群 ${item.groupId} 里的 ${item.nick || item.uid}` : `QQ 上的${callName}（${item.uid}）`;
   return `【来自 ${who}，${new Date(item.time).toLocaleString('zh-CN')}】\n${item.text || '（只有图片，没有文字）'}`;
 }
+
+/** 把 OneBot 的 message 事件（push 过来的）转成和历史接口一样的形状；不是消息事件返回 null */
+export function eventToItem(ev) {
+  if (!ev || ev.post_type !== 'message') return null;
+  const mt = String(ev.message_type || '');
+  const gid = mt === 'group' ? String(ev.group_id || '') : '';
+  const segs = Array.isArray(ev.message) ? ev.message : [];
+  const flat = flattenSegments(segs);
+  return {
+    messageId: String(ev.message_id || ev.msgId || ''),
+    uid: String(ev.user_id || ''),
+    nick: String(ev.sender?.card || ev.sender?.nickname || ''),
+    groupId: gid,
+    time: Number(ev.time || 0) * 1000 || Date.now(),
+    ...flat,
+    raw: ev,
+  };
+}
