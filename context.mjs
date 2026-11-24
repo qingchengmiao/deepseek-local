@@ -255,20 +255,44 @@ export function retrieve({ index, query, topK = 4, weightOf = () => 1, minScore 
 // ---------------------------------------------------------------- 压缩摘要
 
 export const MEMORY_MARKER = '你是上下文压缩器';
-export const MEMORY_SYSTEM = `${MEMORY_MARKER}。把【旧对话】压成一段可复用记忆，供后续回答参考。
+export const MEMORY_SYSTEM = `${MEMORY_MARKER}。你在给未来的自己留一张交接便条 —— 未来的你读不到这段对话，只有这张便条。
+
+开头第一行固定写：这份便条可以被推翻，以眼前证据为准。
 
 要求：
-- 只写对话里出现过的内容，不许推测、不许补全
-- 保留：确定的事实与数字、已做出的决定及理由、用户的偏好与硬性要求、未完成的事项
+- 只写对话里真出现过的东西，不许推测、不许补全、不许替自己圆场
+- **证据分级**：能指到具体工具输出 / 文件 / 行号 / 命令结果的，写成「已验证：…」并带上那个证据（路径、行号、数字）；只是推断、没跑过的，写成「⚠️ 未验证：…」。不要把推断写成事实
+- 保留：确定的数字与路径、已做出的决定**及理由**、用户的偏好与硬性要求、踩过的坑与断掉的死路（以及为什么断）
 - 丢掉：寒暄、重复、临时试错、已经从上下文里消失的中间产物
 - 用密集条目，不要分段散文；总长 200～900 字
-- 如果给了【已有记忆】，把新内容合并进去（新的覆盖旧的），不要重复
+- 如果给了【已有记忆】，把新内容合并进去（新的覆盖旧的），不要重复；旧条目如果被这次对话推翻了，改写成新的结论并注明推翻了什么
 
 输出格式（没有内容的段落写「无」）：
 ## 事实
 ## 决定与理由
 ## 偏好与要求
-## 未完成`;
+## 未完成与待验证（专记没做成、没验成、还欠着的东西）
+## 关键词索引（每行：关键词 → 说的是什么）`;
+
+/** 惊讶度：新便条里有多少内容是旧便条没有的（0=完全重复，1=全新）。用汉字/字母二元组覆盖率当代理，不调模型。 */
+export function memoryNovelty(prevText, nextText) {
+  const a = String(prevText || '');
+  const b = String(nextText || '');
+  if (!a.trim()) return 1;
+  if (!b.trim()) return 0;
+  const grams = (s) => {
+    const set = new Set();
+    const t = s.replace(/[^\p{L}\p{N}]+/gu, '');
+    for (let i = 0; i + 1 < t.length; i++) set.add(t.slice(i, i + 2));
+    return set;
+  };
+  const gb = grams(b);
+  if (!gb.size) return 0;
+  const ga = grams(a);
+  let hit = 0;
+  for (const g of gb) if (ga.has(g)) hit += 1;
+  return Math.round((1 - hit / gb.size) * 1000) / 1000;
+}
 
 export function memoryUserPrompt(previous, transcript, limitChars = 24000) {
   const prev = String(previous || '').trim();
@@ -280,12 +304,16 @@ export function memoryUserPrompt(previous, transcript, limitChars = 24000) {
 // ---------------------------------------------------------------- 时间加权概括（第二级）
 
 export const CONSOLIDATE_MARKER = '你是长期记忆整理器';
-export const CONSOLIDATE_SYSTEM = `${CONSOLIDATE_MARKER}。把【分段记忆】和【原文节选】合并成一段更短的长期记忆。
+export const CONSOLIDATE_SYSTEM = `${CONSOLIDATE_MARKER}。你在把【分段记忆】和【原文节选】并成一张更短的交接便条，给未来的自己用 —— 它会被后来的证据推翻，所以每条都要能追溯。
+
+开头第一行固定写：这份便条可以被推翻，以眼前证据为准。
 
 要求：
 - 只写出现过的内容，不许推测、不许补全
 - **按时间权重处理**：越靠前的段越简略（可能只留一句或一个数字），越靠后的段保留细节
 - 半衰期以外的老内容，只保留「以后还可能有用的结论」（人名/数字/偏好/未完成的决定），过程一律丢掉
+- **证据分级**：能指到具体工具输出 / 文件 / 行号 / 命令结果的，写「已验证：…」并带证据；只是推断的写「⚠️ 未验证：…」
+- 被这次对话推翻的旧结论，改写成新结论并注明「推翻了：…」
 - 每条保留一句「关键词：…」，方便以后按关键词把原文找回来
 - 总长 150～600 字
 
@@ -293,7 +321,7 @@ export const CONSOLIDATE_SYSTEM = `${CONSOLIDATE_MARKER}。把【分段记忆】
 ## 长期事实
 ## 已定的事（理由可省）
 ## 偏好与硬要求
-## 未完成
+## 未完成与待验证（专记没做成、没验成、还欠着的东西）
 ## 关键词索引（每行：关键词 → 说的是什么）`;
 
 export function consolidateUserPrompt(prevText, records, transcript, limitChars = 20000) {

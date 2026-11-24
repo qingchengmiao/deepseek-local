@@ -44,6 +44,7 @@ import {
   parseActivateRequest,
   CONSOLIDATE_SYSTEM,
   consolidateUserPrompt,
+  memoryNovelty,
 } from './context.mjs';
 import { organizeArchive, previewArchive, KIND_LABEL, readZip } from './archive.mjs';
 import { readUrl as readLinkUrl, extractUrls, hasBrowser } from './fetchlink.mjs';
@@ -63,6 +64,7 @@ import {
 import { qqConfig, onebot, loginInfo, sendPrivate, sendGroup, friendHistory, groupHistory, pickNew, qqUserPrompt, eventToItem } from './qq.mjs';
 import { createLearnService } from './learn-service.mjs';
 import { createUserLearnService, buildOwnProfileText } from './user-learn.mjs';
+import { createVectorIndex } from './vector-index.mjs';
 import { isoWeek } from './qqgroup.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -611,6 +613,8 @@ function clampNum(v, lo, hi, dflt) {
 // ---------------------------------------------------------------- 每个会话的上下文参数
 // conv.ctx 只存「这个会话自己改过的」键，其余跟随全局 settings。
 const CTX_BUDGET_MAX = 1000000; // deepseek-flash 的窗口是 1M，允许顶到窗口
+// 惊讶度闸门：新便条相对旧便条的「新内容占比」低于这个值就判定为没学到东西，保留旧便条
+const MEMORY_NOVELTY_MIN = 0.12;
 const CTX_OVERRIDE_NUMS = {
   ctxBudget: [4000, CTX_BUDGET_MAX, CTX_DEFAULTS.ctxBudget],
   ctxHotRatio: [0.2, 0.95, CTX_DEFAULTS.ctxHotRatio],
@@ -995,7 +999,85 @@ function effQqConfig(settings = {}) {
   return { ...base, baseUrl: `http://127.0.0.1:${port}` };
 }
 
-// 群聊自学习：数据落在 <DATA>/qq-learn，跟着应用数据目录走（覆盖 dist 代码不会丢）
+// 检索索引：BM25 词面 + 哈希向量双路。
+// 词面负责关键词/路径/报错原文（实测中文短查询纯向量 recall@1 只有 13%、词面 79%），
+// 向量只在词面打平时兜底；片段正文只存前 320 字，供算 IDF 和出预览，不存整段。
+const vectorIndex = createVectorIndex({
+  dataDir: DATA,
+  listConversations: async () => {
+    const idx = await loadIndex();
+    return idx.map((e) => ({ id: e && e.id, title: e && e.title }));
+  },
+  loadConversation: (id) => loadConversation(String(id)),
+  chunkMessages,
+});
+
+// 检索索引是懒建的：启动后后台建一次，之后每 5 分钟增量刷一次（只重算改过的会话）。
+// 首建 3-4 秒，是同步 CPU 活 —— 放在 listen 之后、且只在空闲时才建，别和首条消息抢。
+let vectorBuiltAt = 0;
+let vectorBuilding = false;
+async function vectorRefresh({ force = false } = {}) {
+  if (vectorBuilding) return null;
+  vectorBuilding = true;
+  const t0 = Date.now();
+  try {
+    const r = await vectorIndex.refresh({ force });
+    vectorBuiltAt = Date.now();
+    log(`检索索引：${r.entries} 片段 / ${r.conversations} 会话 · 建库 ${Date.now() - t0}ms`);
+    return r;
+  } catch (e) {
+    log('检索索引建库失败（不影响对话）：', e.message);
+    return null;
+  } finally {
+    vectorBuilding = false;
+  }
+}
+
+function startVectorLoop() {
+  const tick = () => {
+    vectorRefresh().catch(() => {});
+  };
+  setTimeout(tick, 8000).unref();
+  const timer = setInterval(tick, 5 * 60 * 1000);
+  timer.unref();
+  return () => clearInterval(timer);
+}
+
+// 把向量库的片段命中翻译成前端认识的形状（要 conversationId/messageId/role/snippet）。
+async function vectorSearchHits(q, limit = 40) {
+  const r = await vectorIndex.search(q, { topK: limit });
+  const convCache = new Map();
+  const out = [];
+  for (const h of r.hits) {
+    let conv = convCache.get(h.conversationId);
+    if (conv === undefined) {
+      try {
+        conv = await loadConversation(h.conversationId);
+      } catch {
+        conv = null;
+      }
+      convCache.set(h.conversationId, conv);
+    }
+    if (!conv || !Array.isArray(conv.messages)) continue;
+    const i = Math.min(Math.max(0, h.from | 0), conv.messages.length - 1);
+    if (i < 0) continue;
+    const m = conv.messages[i];
+    out.push({
+      conversationId: h.conversationId,
+      title: h.title || conv.title,
+      messageId: m.id,
+      role: m.role,
+      index: i,
+      snippet: String(h.snippet || '').slice(0, 220),
+      date: m.createdAt || conv.updatedAt,
+      score: h.score,
+      coverage: h.coverage,
+    });
+  }
+  return { hits: out, ms: r.ms, scanned: r.scanned, entries: r.entries };
+}
+
+
 const learn = createLearnService({
   dataDir: DATA,
   onebot,
@@ -3524,6 +3606,25 @@ async function compactMemory(conv, settings, history, upto, { force = false, lev
   }
   if (!text) return { ok: false, error: '模型返回了空摘要' };
 
+  // 惊讶度闸门：新便条跟旧便条几乎一样，说明这段对话没带来新信息 —— 不重写，只把覆盖范围往后推。
+  // 阈值取自 neural-memory 的 surprise 思路（那边用的是 ‖pred−v‖²，这里用二元组覆盖率当廉价代理）。
+  const novelty = memoryNovelty(prev?.text, text);
+  if (prev && novelty < MEMORY_NOVELTY_MIN) {
+    conv.memory = {
+      ...prev,
+      upTo: upto - 1,
+      coveredTo: upto - 1,
+      calls: (prev.calls || 0) + 1,
+      updatedAt: now(),
+    };
+    await saveConversation(conv);
+    log(
+      `上下文压缩：第 ${from + 1}–${upto} 条读完，便条几乎没变（惊讶度 ${novelty} < ${MEMORY_NOVELTY_MIN}），` +
+        `保留原便条只推进覆盖范围到第 ${upto} 条`
+    );
+    return { ok: true, memory: conv.memory, warnings, novelty, kept: true };
+  }
+
   const records = Array.isArray(prev?.records) ? prev.records.slice() : [];
   let kw = keywordsFromMessages(slice.map(m => m.content), 8);
   if (!kw.length) kw = keywordsOf(transcript, 8); // 两三条短消息凑不出共同词时，退回词频
@@ -4185,6 +4286,31 @@ async function buildMessages(conv, settings, { withTools = false } = {}) {
   const tHot = Date.now();
   let attImages = 0;
   let attBytes = 0;
+  // 图片预算：热区里历史图片一律 base64 内联会把请求体撑到十几 MB（实测 QQ 那条会话 12.2MB、
+  // 首字被拖到 3.8 秒）。这里从**最新往旧**扫一遍，只保留最近的几张、总量不超过 IMG_BUDGET_BYTES，
+  // 更早的降级成一行文字占位。图片字节数优先用附件里记的 size，没有就按文件大小估。
+  const imgSkip = new Set();
+  const IMG_MAX_COUNT = 3;
+  const IMG_BUDGET_BYTES = 2.4 * 1024 * 1024;
+  {
+    let keep = 0;
+    let acc = 0;
+    for (let i = total - 1; i >= hotFrom; i--) {
+      const m = history[i];
+      if (!m || m.role !== 'user') continue;
+      for (const att of m.attachments || []) {
+        if (!att || att.kind !== 'image' || !att.uploadId) continue;
+        const sz = Number(att.size) > 0 ? Number(att.size) : 400 * 1024;
+        if (keep < IMG_MAX_COUNT && acc + sz <= IMG_BUDGET_BYTES) {
+          keep++;
+          acc += sz;
+        } else {
+          imgSkip.add(`${i}:${att.uploadId}`);
+        }
+      }
+    }
+  }
+  let attSkipped = 0;
   for (let i = hotFrom; i < total; i++) {
     const m = history[i];
     const age = messageAgeDays(conv, m, i, total);
@@ -4203,6 +4329,12 @@ async function buildMessages(conv, settings, { withTools = false } = {}) {
         if (att.kind === 'video' || att.kind === 'audio') {
           const blocks = await mediaBlocks(att);
           parts.push(...blocks);
+          continue;
+        }
+        if (att.kind === 'image' && imgSkip.has(`${i}:${att.uploadId}`)) {
+          // 超出图片预算的老图：只留一行占位，别再把它 base64 塞进请求
+          parts.push({ type: 'text', text: `[较早的图片「${att.name || att.uploadId}」未随这次请求发送]` });
+          attSkipped++;
           continue;
         }
         const block = await attachmentPayload(att, withTools);
@@ -4229,6 +4361,7 @@ async function buildMessages(conv, settings, { withTools = false } = {}) {
   meta.bms = bms;
   meta.attImages = attImages;
   meta.attBytes = attBytes;
+  meta.attSkipped = attSkipped;
   meta.tokens = out.reduce((n, m) => n + (typeof m.content === 'string' ? estimateTokens(m.content) : 0), 0);
   return { messages: out, meta };
 }
@@ -4549,6 +4682,7 @@ async function handleChat(req, res, presetBody) {
     hotMs: Number(ctxMeta.hotMs) || 0,
     bms: ctxMeta.bms || null,
     attImages: Number(ctxMeta.attImages) || 0,
+    attSkipped: Number(ctxMeta.attSkipped) || 0,
     attBytes: Number(ctxMeta.attBytes) || 0,
     memPending: !!ctxMeta.memoryPending,
     attachments: lastMsgAtts,
@@ -4907,6 +5041,7 @@ async function handleChat(req, res, presetBody) {
     hotMs: Number(ctxMeta.hotMs) || 0,
     bms: ctxMeta.bms || null,
     attImages: Number(ctxMeta.attImages) || 0,
+    attSkipped: Number(ctxMeta.attSkipped) || 0,
     attBytes: Number(ctxMeta.attBytes) || 0,
     memPending: !!ctxMeta.memoryPending,
     links: linkPages.filter(p => p.ok).length,
@@ -6079,7 +6214,30 @@ stopQQBridge();
 
   if (pathname === '/api/search' && method === 'GET') {
     const q = url.searchParams.get('q') || '';
-    return sendJson(res, 200, { hits: await searchConversations(q), query: q });
+    const limit = Math.min(120, Math.max(1, Number(url.searchParams.get('limit')) || 40));
+    const t0 = Date.now();
+    try {
+      const r = await vectorSearchHits(q, limit);
+      if (r.hits.length) {
+        return sendJson(res, 200, { hits: r.hits, query: q, engine: 'index', ms: Date.now() - t0, entries: r.entries });
+      }
+      // 索引里没有命中 → 退回老的全文扫描（比如索引还没建好、或是刚导入的新会话）
+      const hits = await searchConversations(q, 60);
+      return sendJson(res, 200, { hits, query: q, engine: hits.length ? 'scan' : 'none', ms: Date.now() - t0 });
+    } catch (e) {
+      const hits = await searchConversations(q, 60);
+      return sendJson(res, 200, { hits, query: q, engine: 'scan', error: e.message, ms: Date.now() - t0 });
+    }
+  }
+
+  if (pathname === '/api/search/status' && method === 'GET') {
+    const st = await vectorIndex.status();
+    return sendJson(res, 200, { ...st, builtAt: vectorBuiltAt, building: vectorBuilding });
+  }
+
+  if (pathname === '/api/search/refresh' && method === 'POST') {
+    const r = await vectorRefresh({ force: url.searchParams.get('force') === '1' });
+    return sendJson(res, 200, { ok: !!r, ...(r || {}), status: vectorIndex.status() });
   }
 
   if (pathname === '/api/context/summary-test' && method === 'POST') {
@@ -6429,6 +6587,7 @@ startQQBridge();
 startQqEvents();
   startHealLoop(); // 隔离实例的自动纠错（90 秒一轮，设置里 napcatAutoHeal 可关）
   startLearnLoop(); // 群聊自学习：10 分钟抽一轮、跨周自动结算（设置里 learnAuto 可关）
+startVectorLoop(); // 检索索引：启动 8 秒后后台建一次，之后每 5 分钟增量刷（只重算改过的会话）
 
   const shutdown = async () => {
     log('正在关闭…');
