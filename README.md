@@ -551,6 +551,24 @@ pwsh -NoProfile -File tools\_run-fresh.ps1 -Tests qq-test,context-test,route-tes
 
 ---
 
+## 技能包（2026-11-24 加）
+
+`skills/<id>/SKILL.md` 就是一份技能，DSH 里那套格式照搬：YAML front matter 写 `name` / `description`，正文是要注入的内容。
+
+- 位置：`skills/`（开发态与 `resources\app\skills` 各一份，装好的实例读自己那份）。`DSAPP_SKILLS` 环境变量可以指到别的目录，测试用。
+- 识别：只认有 `SKILL.md` 的目录；没 front matter 就用第一个 `# 标题` 当名字、第一段非标题文字当描述。
+- 注入：设置里勾上的（`settings.enabledSkills`）在 `buildMessages` 里拼成**单独一条 system**，抬头 `【技能：名字】`，跟在风格提示后面。单个技能上限 6000 字，超了截断并注一句「技能过长已截断」。
+- 与回复风格无关：`native` 也照样注入技能，两件事互不影响。
+- 保存时按目录真实存在的 id 过滤，写 `../x` 之类的东西进不来。
+
+接口：`GET /api/skills` 返回 `{dir, skills:[{id,name,description,chars,file,enabled}]}`。
+
+第一个真技能是 `skills/video-platform-voice`（视频平台语感），数字不是手写的，是从 `voice-video\gen_skill.py` 读 102 万条语料统计生成的：弹幕中位 6 字、78% 不带句末标点、语气词 3.04/100 字、各分区性格表、各平台对照，末尾写明「抖音/快手/西瓜没采到，别编」。
+
+验证：`node tools/skill-test.mjs`（22 项，假上游 + 临时技能目录）。实测效果——勾上它问「帮我写三条B站弹幕」，出来的是「这个汁儿看着就香啊 / 半夜刷到这个我真服了 / 啊啊啊饿了饿了」，`context` 事件里能看到 `skills:["video-platform-voice"]`。截图 `data/shots/100-设置-技能包.png`。
+
+---
+
 ## 几个实现上的坑（改代码时留意）
 
 - **带 `tools` 的请求必须回传历轮的 `reasoning_content`，否则 400**；不带 tools 时反而不能传（传了也被忽略）。所以 `buildMessages` 只在联网时才把思考内容拼回历史。

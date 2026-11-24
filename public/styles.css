@@ -472,6 +472,12 @@ a:hover { text-decoration: underline; }
 .switch-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 0; border-top: 1px solid var(--border); }
 .switch-row .lbl { font-size: 13.5px; }
 .switch-row .desc { font-size: 12px; color: var(--text-3); margin-top: 2px; }
+.skill-list { border: 1px solid var(--border); border-radius: 8px; padding: 2px 10px; max-height: 240px; overflow-y: auto; }
+/* .field label 是 display:block，会盖掉 .switch-row 的 flex，所以这里要提权 */
+.field .skill-list .skill-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 0; border-top: 1px solid var(--border); cursor: pointer; }
+.field .skill-list .skill-row:first-child { border-top: none; }
+.field .skill-list .skill-row input { flex: 0 0 auto; margin: 0; }
+.skill-list .desc { font-size: 11.5px; line-height: 1.45; }
 .modal-foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
 .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 4px 0 6px; }
 .stat-card { padding: 12px 14px; border-radius: 12px; background: var(--bg-soft); border: 1px solid var(--border); }

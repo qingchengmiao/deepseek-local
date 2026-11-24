@@ -254,7 +254,88 @@ const HUMAN_STYLE_PROMPT = `你不是在写报告，是在跟人说话。第一�
 句子可以短，可以说一半，可以说错了当场改口。
 允许有偏向和情绪，可以说"我觉得""我倾向这个"。
 别用三段排比，别在每段末尾再总结一句刚说过的话，别用"值得注意的是""综上所述""由此可见"串场。
-短回答不用硬编号，也别给每个名词加粗。但用户明确要清单、步骤、表格、代码时照给，别为了口气把东西讲糊。`;
+短回答不用硬编号，也别给每个名词加粗。但用户明确要清单、步骤、表格、代码时照给，别为了口气把东西讲糊。
+语气词该用就用：啊、吧、呢、呗、嘛、咯，放句尾，别堆。可以自嘲、可以说"我也菜"。
+一个梗最多一个，而且别解释梗；对不熟的人别用"典""孝""急了"这种带刺的。
+别一句话塞一串逗号——真人宁可断成两句；句子过半要短（十个字以内），转折放在前半段，别先摆结论再硬拐。
+短了就别写句号；一个暗喻就够，别在三十个字里塞两个比喻。`;
+
+// ---- 技能包：skills/<id>/SKILL.md，YAML front matter 给 name/description，正文就是注入内容
+const SKILLS_DIR = process.env.DSAPP_SKILLS ? path.resolve(process.env.DSAPP_SKILLS) : path.join(ROOT, 'skills');
+const SKILL_MAX_CHARS = 6000; // 单个技能注入上限，防止把上下文挤爆
+
+function parseSkillMeta(text) {
+  const out = { name: '', description: '', body: text };
+  const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(text);
+  if (m) {
+    for (const line of m[1].split(/\r?\n/)) {
+      const kv = /^\s*(name|description)\s*:\s*(.*)$/.exec(line);
+      if (kv) out[kv[1]] = kv[2].trim().replace(/^["']|["']$/g, '');
+    }
+    out.body = text.slice(m[0].length);
+  }
+  if (!out.name) {
+    const h = /^#\s+(.+)$/m.exec(out.body);
+    if (h) out.name = h[1].trim();
+  }
+  if (!out.description) {
+    const p = out.body.split(/\r?\n/).map(s => s.trim()).find(s => s && !s.startsWith('#'));
+    if (p) out.description = p.slice(0, 160);
+  }
+  return out;
+}
+
+function listSkills() {
+  let dirs = [];
+  try {
+    dirs = fs.readdirSync(SKILLS_DIR, { withFileTypes: true }).filter(d => d.isDirectory()).map(d => d.name);
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const id of dirs.sort()) {
+    const file = path.join(SKILLS_DIR, id, 'SKILL.md');
+    if (!existsSync(file)) continue;
+    let text = '';
+    try {
+      text = fs.readFileSync(file, 'utf8');
+    } catch {
+      continue;
+    }
+    const meta = parseSkillMeta(text);
+    out.push({
+      id,
+      name: meta.name || id,
+      description: meta.description || '',
+      chars: meta.body.trim().length,
+      file,
+    });
+  }
+  return out;
+}
+
+// 只读已启用的技能，按 settings.enabledSkills 的顺序拼成一段
+function skillsPrompt(settings) {
+  const ids = Array.isArray(settings && settings.enabledSkills) ? settings.enabledSkills : [];
+  if (!ids.length) return '';
+  const known = new Map(listSkills().map(s => [s.id, s]));
+  const parts = [];
+  for (const id of ids) {
+    const meta = known.get(id);
+    if (!meta) continue;
+    let body = '';
+    try {
+      body = parseSkillMeta(fs.readFileSync(meta.file, 'utf8')).body.trim();
+    } catch {
+      continue;
+    }
+    if (!body) continue;
+    if (body.length > SKILL_MAX_CHARS) body = body.slice(0, SKILL_MAX_CHARS) + '\n…（技能过长已截断）';
+    parts.push(`【技能：${meta.name}】\n${body}`);
+  }
+  return parts.length ? `以下是用户启用的技能，说话/写作时按它来（没触发就别硬套）：\n\n${parts.join('\n\n')}` : '';
+}
+
 
 const DEFAULT_SETTINGS = {
   apiKey: '',
@@ -272,6 +353,7 @@ const DEFAULT_SETTINGS = {
   temperature: 1.0,
   systemPrompt: '',
   replyStyle: 'human', // native=原生（不注入）| human=活人感 | custom=只用自己的 systemPrompt
+  enabledSkills: [], // 用户手动启用的技能 id（skills/<id>/SKILL.md）
   maxHistoryMessages: 0, // 0 = 不截断
   theme: 'auto',
   language: '中文',
@@ -567,6 +649,11 @@ async function saveSettings(patch) {
     else if (k === 'ttsVoice') next.ttsVoice = v === 'tide' ? 'tide' : 'stella';
     else if (k === 'language') next.language = LANGUAGES.includes(v) ? v : '中文';
     else if (k === 'replyStyle') next.replyStyle = ['native', 'human', 'custom'].includes(v) ? v : 'human';
+    else if (k === 'enabledSkills') {
+      const ids = new Set(listSkills().map(s => s.id));
+      const arr = Array.isArray(v) ? v : [];
+      next.enabledSkills = [...new Set(arr.map(x => String(x || '').trim()).filter(x => ids.has(x)))];
+    }
     else if (typeof v === 'boolean') next[k] = v;
     else next[k] = v;
   }
@@ -639,9 +726,60 @@ const qqState = {
   received: 0,
 };
 
+// QQ 回话的排版：长回答拆成一串短句、一句一行，句末不留句号（照他平时的说话习惯）。
+// 只动标点和分行，不改内容；切太碎就靠 maxLines 兜住。
+// 把回答拆成一条一条短消息。分段由模型自己按语义决定（它写的时候就用空行分段），
+// 这里只做兜底：段落太长（>60 字）才按句末标点再断，段尾的句号、分号、逗号去掉。
+function qqSemanticParts(text, { maxParts = 8, paraMax = 60, lineMax = 40 } = {}) {
+  const raw = String(text || '').replace(/\r/g, '').trim();
+  if (!raw) return [];
+  const clean = s => s.replace(/[。；;，,、\s]+$/, '').trim();
+  const chunks = raw.split(/\n\s*\n/).map(s => s.replace(/\n+/g, ' ').trim()).filter(Boolean);
+  const parts = [];
+  for (const chunk of chunks) {
+    if (chunk.length <= paraMax) { parts.push(clean(chunk)); continue; }
+    // 太长的段落：按句末标点断，两句拼一条，别切成一字一句
+    const sentences = chunk.split(/(?<=[。！？!?；;…~～])/).map(s => s.trim()).filter(Boolean);
+    let buf = '';
+    for (const s of sentences) {
+      const t = s.replace(/^[。，,、；;]+/, '').trim();
+      if (!t) continue;
+      if (!buf) { buf = t; continue; }
+      if ((buf + t).length <= lineMax) { buf = buf.replace(/[。；;]$/, '') + t; } else { parts.push(clean(buf)); buf = t; }
+    }
+    if (buf) parts.push(clean(buf));
+  }
+  return parts.filter(Boolean).slice(0, maxParts);
+}
+
+// 一条消息里用换行分句（推送、样张用这个）
+function qqShortLines(text, opts = {}) {
+  return qqSemanticParts(text, opts).join('\n');
+}
+
 function qqRemember(entry) {
   qqState.recent.push({ at: now(), ...entry });
   if (qqState.recent.length > 60) qqState.recent.splice(0, qqState.recent.length - 60);
+}
+
+// 已读清单要落盘：只放内存的话，每次重启都把最近 20 条当新的，会一口气补发一堆回答
+const QQ_SEEN_FILE = path.join(DATA, 'qq-seen.json');
+let qqSeenLoaded = false;
+async function loadQqSeen() {
+  try {
+    const raw = JSON.parse(await fsp.readFile(QQ_SEEN_FILE, 'utf8'));
+    const ids = Array.isArray(raw) ? raw : (Array.isArray(raw.ids) ? raw.ids : []);
+    const keep = ids.map(x => String(x)).filter(Boolean);
+    if (keep.length) qqState.seen = keep.slice(-300);
+  } catch { /* 没有文件就是第一次跑 */ }
+  return qqState.seen;
+}
+async function saveQqSeen() {
+  try {
+    const ids = qqState.seen.slice(-300);
+    await fsp.mkdir(DATA, { recursive: true });
+    await fsp.writeFile(QQ_SEEN_FILE, JSON.stringify({ at: now(), ids }, null, 0), 'utf8');
+  } catch { /* 存不下就算了，别把轮询搞崩 */ }
 }
 
 // QQ 通道用哪个后端：默认用「隔离实例」（自己那份 delta、端口 napcatHttpPort），
@@ -768,6 +906,30 @@ async function qqConversation() {
   return conv;
 }
 
+/** 没配 qqUid 时自己找一个默认对象：最近联系人优先，其次好友列表第一个 */
+async function qqDiscoverUid(cfg) {
+  const pickNumber = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? String(n) : '';
+  };
+  try {
+    const r = await onebot(cfg, 'get_recent_contact', { count: 20 });
+    for (const it of [].concat((r && r.data) || [])) {
+      const type = Number(it && it.chat_type);
+      const uid = pickNumber(it && (it.peerUin || it.user_id || it.target_id));
+      if (uid && (type === 1 || type === 0 || !type)) return uid;
+    }
+  } catch { /* 老版本没这个接口 */ }
+  try {
+    const r = await onebot(cfg, 'get_friend_list', {});
+    for (const it of [].concat((r && r.data) || [])) {
+      const uid = pickNumber(it && (it.user_id || it.uin));
+      if (uid) return uid;
+    }
+  } catch { /* 没登录时拿不到 */ }
+  return '';
+}
+
 /** 换 / 建 QQ 回话会话：'' 或 'new' 新建一个；否则绑定已有会话（上下文直接续） */
 async function qqBindConversation(rawId) {
   const id = String(rawId == null ? '' : rawId).trim();
@@ -797,6 +959,14 @@ async function qqPollOnce({ reply = true } = {}) {
   const settings = await loadSettings();
   const cfg = effQqConfig(settings);
   if (cfg.mode === 'off') return { skipped: 'mode-off' };
+  // 没配对象：先自己去 OneBot 里找一个（最近联系人 → 好友列表），找到就存下来
+  if (!cfg.uid && !cfg.group) {
+    const guess = await qqDiscoverUid(cfg).catch(() => '');
+    if (guess) {
+      cfg.uid = guess;
+      await saveSettings({ qqUid: guess }).catch(() => null);
+    }
+  }
   if (!cfg.uid && !cfg.group) return { skipped: 'no-target' };
   const t0 = now();
   let list = [];
@@ -805,27 +975,68 @@ async function qqPollOnce({ reply = true } = {}) {
   // 只认对方发来的（群消息里过滤掉自己）
   const me = qqState.info?.uid || '';
   if (me) list = list.filter(m => m.uid !== me);
+  // 已读记到盘上：不记的话每次重启都把最近 20 条当成新的，会一口气补发一堆回答
+  if (!qqSeenLoaded) {
+    qqSeenLoaded = true;
+    await loadQqSeen();
+    // 冷启动：历史一律算「已经看过」，不补答旧消息
+    if (!qqState.seen.length) {
+      qqState.seen = list.map(m => String(m.messageId)).filter(Boolean);
+      await saveQqSeen();
+      qqState.lastPollAt = now();
+      return { skipped: 'warm-start', history: list.length };
+    }
+  }
   const { fresh, seen } = pickNew(list, qqState.seen);
-  qqState.seen = seen;
+  if (seen.length !== qqState.seen.length) {
+    qqState.seen = seen;
+    await saveQqSeen();
+  }
   qqState.lastPollAt = now();
   qqState.lastPollMs = qqState.lastPollAt - t0;
   const outs = [];
-  for (const item of fresh) {
-    if (!item.text && !item.images.length) continue;
+  const usable = fresh.filter(item => item.text || item.images.length);
+  for (const item of usable) {
     qqState.received += 1;
     qqRemember({ dir: 'in', text: item.text, uid: item.uid, nick: item.nick || '', messageId: item.messageId, images: item.images.length });
-    if (!reply || cfg.mode !== 'both') continue;
+  }
+  if (!usable.length) return { fresh: 0, replied: 0, outs, ms: now() - t0 };
+  const conv = await qqConversation();
+  if (!reply || cfg.mode !== 'both') {
+    // 只发不回：收到的话也要记进会话，不然界面上什么都看不到
     try {
-      const conv = await qqConversation();
-      const res = await chatOnce(conv, qqUserPrompt(item, { callName: settings.qqCallName || '对方' }), settings);
-      const sent = await qqSendText(res.answer);
-      outs.push({ messageId: item.messageId, answer: res.answer.slice(0, 120), sent });
+      for (const item of usable) {
+        conv.messages.push(newMessage('user', qqUserPrompt(item, { callName: settings.qqCallName || '对方' })));
+      }
+      conv.updatedAt = now();
+      await saveConversation(conv);
+    } catch { /* 记不进去就算了 */ }
+    return { fresh: usable.length, replied: 0, outs, ms: now() - t0 };
+  }
+  // 他说一句就回一轮：每条消息都是一次完整对话（不再合并成一批），
+  // 但绝不去补答重启前的旧消息——那才是之前「一直发回答」的原因。
+  for (const item of usable) {
+    try {
+      const ask = qqUserPrompt(item, { callName: settings.qqCallName || '对方' })
+        + '\n\n【这条回在手机上】按语义分段：每段单独发一条，段与段之间空一行。'
+        + '短的一句话就是一段；长的按意思拆成几段，别把「第一」「第二」和它后面的解释拆开。'
+        + '句末不要加句号，最多八段。';
+      const res = await chatOnce(conv, ask, settings);
+      // 一句一条地发，中间留点间隔，像人打字
+      const parts = qqSemanticParts(res.answer);
+      const ids = [];
+      for (let i = 0; i < parts.length; i++) {
+        if (i) await new Promise(r => setTimeout(r, 700));
+        const sent = await qqSendText(parts[i]);
+        if (sent) ids.push(sent);
+      }
+      outs.push({ messageId: item.messageId, answer: res.answer.slice(0, 120), parts: parts.length, sentIds: ids });
     } catch (e) {
       qqState.lastError = '回复失败：' + e.message;
       qqRemember({ dir: 'error', text: e.message });
     }
   }
-  return { fresh: fresh.length, replied: outs.length, outs, ms: now() - t0 };
+  return { fresh: usable.length, replied: outs.length, outs, ms: now() - t0 };
 }
 
 // ---------------------------------------------------------------- NapCat（QQ 登录）
@@ -1001,7 +1212,7 @@ async function napcatPids(settings) {
     let base = DEFAULT_SETTINGS.qqBaseUrl;
     try { base = new URL(settings.qqBaseUrl || DEFAULT_SETTINGS.qqBaseUrl); } catch { base = new URL(DEFAULT_SETTINGS.qqBaseUrl); }
     const port = Number(base.port) || 80;
-    const text = await execFileAsync('netstat', ['-ano', '-p', 'TCP'], { timeout: 15000 }).then(r => r.stdout).catch(() => '');
+    const text = await execFileAsync('netstat', ['-ano', '-p', 'TCP'], { timeout: 15000, windowsHide: true }).then(r => r.stdout).catch(() => '');
     for (const line of text.split(/\r?\n/)) {
       if (!line.includes(':' + port + ' ') && !line.includes(':' + port + '\t')) continue;
       const m = line.trim().match(/\s(\d+)$/);
@@ -1013,7 +1224,7 @@ async function napcatPids(settings) {
   try {
     const ps = await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
       'Get-CimInstance Win32_Process | Where-Object { $_.CommandLine } | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress',
-    ], { timeout: 20000 });
+    ], { timeout: 20000, windowsHide: true });
     const raw = JSON.parse(String(ps.stdout || '[]').trim() || '[]');
     for (const it of [].concat(raw)) {
       const cmd = String((it && it.CommandLine) || '').toLowerCase();
@@ -1031,7 +1242,7 @@ async function napcatPids(settings) {
 function killPids(pids) {
   const killed = [];
   for (const pid of pids) {
-    try { execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' }); killed.push(pid); } catch { /* 已经没了 */ }
+    try { execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true }); killed.push(pid); } catch { /* 已经没了 */ }
   }
   return killed;
 }
@@ -1153,8 +1364,23 @@ async function napcatHostRun(settings, verb, extraArgs = []) {
   try { data = JSON.parse(text); } catch {
     try { data = JSON.parse(text.split(/\r?\n/).filter(Boolean).pop() || 'null'); } catch { data = null; }
   }
+  // 宿主还会在 JSON 前后打几行人话（例如「[host] 已停止 2 个进程」），
+  // 整体和末行都不成立时，把第一对 { } 之间那段抠出来再试一次。
   if (!data) {
-    return { ok: false, error: (r.err || r.out || '宿主没有输出 JSON').slice(0, 400), exe, code: r.code };
+    const a = text.indexOf('{');
+    const b = text.lastIndexOf('}');
+    if (a >= 0 && b > a) {
+      try { data = JSON.parse(text.slice(a, b + 1)); } catch { data = null; }
+    }
+  }
+  if (!data) {
+    // start / stop 这类动词宿主只回一行人话（退出码 0 = 成功、3 = 已经在跑），没有 JSON
+    const msg = String(text || r.err || '').trim();
+    const code = Number(r.code);
+    if (verb === 'start' || verb === 'stop') {
+      return { ok: code === 0 || code === 3, verb, message: msg, alreadyRunning: code === 3, exe, code };
+    }
+    return { ok: false, error: (msg || '宿主没有输出 JSON').slice(0, 400), exe, code };
   }
   return { ...data, exe, code: r.code, hostOk: r.ok };
 }
@@ -1417,9 +1643,12 @@ function startQQBridge() {
     try {
       const settings = await loadSettings();
       const cfg = effQqConfig(settings);
-      if (cfg.mode !== 'off' && (cfg.uid || cfg.group)) {
+      // 没配对象也要跑：qqPollOnce 会自己去 OneBot 里挑一个（最近联系人 → 好友列表），
+      // 挑到了就存进设置，之后就是正常轮询。
+      if (cfg.mode !== 'off') {
         if (!qqState.info || !qqState.info.ok) qqState.info = await loginInfo(cfg);
-        if (cfg.mode === 'both') {
+        // both = 收 + 回；send = 只收不自动回（但也要收，不然界面上看不到）
+        if (cfg.mode === 'both' || cfg.mode === 'send') {
           const r = await qqPollOnce();
           if (r && r.skipped) qqState.lastError = '';
         }
@@ -3237,6 +3466,13 @@ async function buildMessages(conv, settings, { withTools = false } = {}) {
   const systemPrompt = [stylePrompt, ownPrompt].filter(Boolean).join('\n\n');
   if (systemPrompt) out.push({ role: 'system', content: systemPrompt });
 
+  // 技能包：跟在系统提示词后面，单独一条，别和活人感混成一大段
+  const skillText = skillsPrompt(settings);
+  if (skillText) {
+    out.push({ role: 'system', content: skillText });
+    meta.skills = (settings.enabledSkills || []).slice();
+  }
+
   // 日历：把今天 / 接下来几天的日程带上（模型能主动说「你下午三点有会」）
   if (settings.calendarInContext !== false) {
     try {
@@ -4417,6 +4653,16 @@ async function handleApi(req, res, url) {
 
   if (pathname === '/api/models' && method === 'GET') {
     return sendJson(res, 200, { models: MODELS });
+  }
+
+  // ---------------- 技能包（skills/<id>/SKILL.md）
+  if (pathname === '/api/skills' && method === 'GET') {
+    const settings = await loadSettings();
+    const enabled = new Set(Array.isArray(settings.enabledSkills) ? settings.enabledSkills : []);
+    return sendJson(res, 200, {
+      dir: SKILLS_DIR,
+      skills: listSkills().map(s => ({ ...s, file: s.file, enabled: enabled.has(s.id) })),
+    });
   }
 
   // ---------------- 日历

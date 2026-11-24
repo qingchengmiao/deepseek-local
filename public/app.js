@@ -1741,6 +1741,12 @@ async function openSettings() {
     </div>
 
     <div class="field">
+      <label>技能包</label>
+      <div id="setSkills" class="skill-list"><div class="desc">正在读取…</div></div>
+      <div class="tip">放在 <code>skills/&lt;名字&gt;/SKILL.md</code> 里的技能，勾上就随每次对话注入。一个技能最多 6000 字，勾太多会挤占上下文。</div>
+    </div>
+
+    <div class="field">
       <label>带多少条历史给模型</label>
       <input type="number" id="setHist" min="0" max="500" value="${Number(fresh.maxHistoryMessages) || 0}">
       <div class="tip">0 = 全部带上（长对话注意 token 消耗）。一般不用自己截断，下面的上下文管理会更聪明地处理。</div>
@@ -1932,6 +1938,30 @@ async function openSettings() {
   body.querySelector('#setTheme').value = fresh.theme || 'auto';
   body.querySelector('#setEffort').value = fresh.reasoningEffort || 'high';
   body.querySelector('#setSafety').value = fresh.safetyLevel || 'off';
+  // 技能包：拉列表 → 复选框，勾选状态回写到保存 payload 里
+  (async () => {
+    const box = body.querySelector('#setSkills');
+    if (!box) return;
+    try {
+      const r = await fetch('/api/skills');
+      const d = await r.json();
+      const list = (d.skills || []);
+      if (!list.length) {
+        box.innerHTML = '<div class="desc">还没有技能包。在 skills/ 下建一个目录，放 SKILL.md 就会出现。</div>';
+        return;
+      }
+      box.innerHTML = list.map(s => `
+        <label class="switch-row skill-row">
+          <div>
+            <div class="lbl">${esc(s.name)}</div>
+            <div class="desc">${esc(s.description || '')}</div>
+          </div>
+          <input type="checkbox" class="skill-pick" value="${esc(s.id)}" ${s.enabled ? 'checked' : ''}>
+        </label>`).join('');
+    } catch (e) {
+      box.innerHTML = '<div class="desc">读取技能失败：' + esc(String(e && e.message || e)) + '</div>';
+    }
+  })();
   body.querySelector('#setVoice').value = fresh.ttsVoice || 'stella';
   body.querySelector('#setLang').value = fresh.language || '中文';
   body.querySelector('#setCtxSummarizer').value = fresh.ctxSummarizer || 'auto';
@@ -2056,6 +2086,7 @@ async function openSettings() {
       temperature: Number(body.querySelector('#setTemp').value),
       systemPrompt: body.querySelector('#setSystem').value,
       replyStyle: body.querySelector('#setReplyStyle')?.value || 'human',
+      enabledSkills: [...body.querySelectorAll('.skill-pick:checked')].map(i => i.value),
       maxHistoryMessages: Number(body.querySelector('#setHist').value) || 0,
       ctxCompress: body.querySelector('#setCtxCompress').checked,
       ctxBudget: Number(body.querySelector('#setCtxBudget').value) || 24000,
