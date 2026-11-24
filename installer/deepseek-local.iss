@@ -1,9 +1,9 @@
 ; DeepSeek Local —— 安装包脚本（Inno Setup 6）
 ; 用法：ISCC.exe installer\deepseek-local.iss
-; 产物：dist\installer\DeepSeekLocal-Setup-1.0.2.exe
+; 产物：dist\installer\DeepSeekLocal-Setup-1.0.3.exe
 
 #define MyAppName "DeepSeek Local"
-#define MyAppVersion "1.0.2"
+#define MyAppVersion "1.0.3"
 #define MyAppPublisher "local"
 #define MyLauncher "DeepSeekLauncher.exe"
 

@@ -50,20 +50,25 @@ try {
     writeFileSync('data/shots/94-对话页-拖入浮层.png', Buffer.from(shot.data, 'base64'));
   }
 
-  await ev(`(() => {
-    window.dispatchEvent(new DragEvent('drop', { dataTransfer: window.__dt, bubbles: true, cancelable: true }));
-    return 1;
+  // 拖入后附件条是「立刻」出来的：先在本地挂一个 uploading 的 chip，再去 /api/upload。
+  // 隔离实例塞的是假 Key，上传会被拒、代码故意把 chip 撤掉（见 addAttachment 的 catch），
+  // 所以断言必须和派发在同一个 evaluate 里读——等 1.6s 再读就只剩「已撤掉」了。
+  const dropped = await ev(`(() => {
+    const dt = new DataTransfer();
+    dt.items.add(new File(['拖进来的文本内容'], 'drop-note.txt', { type: 'text/plain' }));
+    document.body.dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
+    const bar = document.querySelector('#attachBar');
+    return {
+      barHidden: bar?.classList.contains('hidden'),
+      text: bar?.textContent || '',
+      chat: !document.querySelector('#chatView')?.classList.contains('hidden'),
+      dz: document.querySelector('#dropZone')?.classList.contains('hidden'),
+    };
   })()`);
-  await sleep(1600);
-  const attached = await ev(`(() => ({
-    barHidden: document.querySelector('#attachBar')?.classList.contains('hidden'),
-    text: document.querySelector('#attachBar')?.textContent || '',
-    chat: !document.querySelector('#chatView')?.classList.contains('hidden'),
-    dz: document.querySelector('#dropZone')?.classList.contains('hidden'),
-  }))()`);
-  check('附件条出现且带文件名', attached.barHidden === false && /drop-note\.txt/.test(attached.text), attached.text.trim().slice(0, 30));
-  check('还在对话页（没被导去导入页）', attached.chat === true);
-  check('拖拽层收起', attached.dz === true);
+  check('附件条出现且带文件名', dropped.barHidden === false && /drop-note\.txt/.test(dropped.text), dropped.text.trim().replace(/\s+/g, ' ').slice(0, 30));
+  check('还在对话页（没被导去导入页）', dropped.chat === true);
+  check('拖拽层收起', dropped.dz === true);
+  await sleep(600);
   check('会话数没变（没落库）', (await convCount()) === before, `${before} → ${await convCount()}`);
 
   // 2) 对话页拖入 zip → 转去导入页，且只有它进列表

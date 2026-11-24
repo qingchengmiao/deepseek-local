@@ -269,9 +269,10 @@ try {
     check('面板里有「整合记忆」按钮', await ev(`[...document.querySelectorAll('.modal [data-x]')].some(b => b.textContent.includes('整合记忆'))`));
     check('面板里有本会话参数（预算下拉 + 三个数字 + 两个开关）',
       await ev(`!!document.querySelector('#ctxLocalBudget') && !!document.querySelector('#ctxLocalHot') && !!document.querySelector('#ctxLocalTopK') && !!document.querySelector('#ctxLocalHalf') && !!document.querySelector('#ctxLocalCompress') && !!document.querySelector('#ctxLocalRag')`));
-    check('本会话预算能选到 1M',
-      await ev(`[...(document.querySelector('#ctxLocalBudget')?.options || [])].some(o => o.value === '1000000')`),
-      await ev(`[...(document.querySelector('#ctxLocalBudget')?.options || [])].map(o => o.value).join(',')`));
+    // 预算控件已从 <select> 换成 <input type="number">（能填自定义值），所以不能再读 options
+    check('本会话预算能填到 1M',
+      await ev(`(() => { const i = document.querySelector('#ctxLocalBudget'); return !!i && i.type === 'number' && Number(i.max) >= 1000000 && Number(i.min) <= 4000; })()`),
+      await ev(`(() => { const i = document.querySelector('#ctxLocalBudget'); return i ? \`type=\${i.type} min=\${i.min} max=\${i.max}\` : 'no input'; })()`));
     check('面板里能保存到本会话 / 恢复跟随全局',
       await ev(`[...document.querySelectorAll('.modal [data-x]')].some(b => b.textContent.includes('保存到本会话')) && [...document.querySelectorAll('.modal [data-x]')].some(b => b.textContent.includes('恢复跟随全局'))`));
     check('面板里写了档位与遗忘阈值', await ev(`[...document.querySelectorAll('.modal .ctx-row')].some(r => /压缩档位/.test(r.textContent))`),
@@ -369,8 +370,8 @@ try {
     check('「调」弹层出现', await ev(`!!document.querySelector('.tune-pop')`));
     check('弹层能改标题/模型/预算',
       await ev(`!!document.querySelector('#tuneTitle') && !!document.querySelector('#tuneModel') && !!document.querySelector('#tuneBudget')`));
-    check('预算下拉有「跟随全局」+1M',
-      await ev(`[...document.querySelectorAll('#tuneBudget option')].some(o => o.value === '0') && [...document.querySelectorAll('#tuneBudget option')].some(o => o.value === '1000000')`));
+    check('预算输入能填到 1M、留空即跟随全局',
+      await ev(`(() => { const i = document.querySelector('#tuneBudget'); return !!i && i.type === 'number' && Number(i.max) >= 1000000 && /跟随全局/.test(i.placeholder || ''); })()`));
     await ev(`[...document.querySelectorAll('.tune-pop [data-tune-act]')].find(b => b.dataset.tuneAct === 'cancel')?.click()`);
     await sleep(200);
     check('弹层能取消', !(await ev(`!!document.querySelector('.tune-pop')`)));
