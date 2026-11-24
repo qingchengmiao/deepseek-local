@@ -1041,6 +1041,25 @@ async function chatOnce(conv, text, settings, { attachments = [] } = {}) {
       ? normalizeModel(settings.routeThinkModel || 'deepseek-flash')
       : normalizeModel(settings.routeChatModel || 'deepseek-v4-pro');
   }
+  // 装配完再兜一次底：模型不能看图却带着图，等于白带（附件是 base64 内联的，不看就是浪费）
+  const imgBlocks = built.messages.reduce((n, m) =>
+    n + (Array.isArray(m.content) ? m.content.filter(p => p && p.type === 'image_url').length : 0), 0);
+  if (imgBlocks > 0) {
+    const meta = MODELS.find(x => x.id === model);
+    if (meta && meta.vision === false) model = normalizeModel(settings.routeThinkModel || 'deepseek-flash');
+  }
+  if (imgBlocks > 0 || attachments.length) {
+    const lastUser = [...built.messages].reverse().find(x => x.role === 'user');
+    const shape = !lastUser ? null : Array.isArray(lastUser.content)
+      ? lastUser.content.map(p => (p && p.type === 'image_url')
+        ? `image(${String(p.image_url?.url || '').split(',').pop()?.length || 0}b)`
+        : String((p && p.text) || '').slice(0, 60))
+      : String(lastUser.content).slice(0, 120);
+    await fsp.appendFile(path.join(DATA, 'qq-debug.jsonl'), JSON.stringify({
+      at: new Date().toISOString(), model, msgs: built.messages.length, imgBlocks,
+      attached: attachments.length, shape,
+    }) + '\n').catch(() => {});
+  }
   const { chat } = apiEndpoints(settings.baseUrl);
   const r = await fetch(chat, {
     method: 'POST',
@@ -1175,7 +1194,10 @@ async function qqImageAttachments(cfg, item, { limit = 4 } = {}) {
   for (const ref of (item.images || []).slice(0, limit)) {
     try {
       const got = await qqImageBytes(cfg, ref);
-      if (!got || !got.buf) continue;
+      if (!got || !got.buf) {
+        await fsp.appendFile(path.join(DATA, 'qq-debug.jsonl'), JSON.stringify({ at: new Date().toISOString(), stage: 'download-fail', ref: String(ref).slice(0, 120) }) + '\n').catch(() => {});
+        continue;
+      }
       let mime = sniffImageMime(got.buf) || got.mime;
       if (!(mime in QQ_IMAGE_EXT)) mime = 'image/png';
       const ext = QQ_IMAGE_EXT[mime];
@@ -1259,13 +1281,11 @@ async function qqPollOnce({ reply = true } = {}) {
   for (const item of usable) {
     try {
       const ask = qqUserPrompt(item, { callName: settings.qqCallName || '对方' })
-        + '\n\n【这条回在手机上】按语义分段：每段单独发一条，段与段之间空一行。'
-        + '短的一句话就是一段；长的按意思拆成几段，别把「第一」「第二」和它后面的解释拆开。'
-        + '句末不要加句号，最多八段。';
+        + '\n\n【这条回在手机上】像平时跟人聊天那样说话：一两段连着说完就行，别为了「分段」把一句话拆成好几行；真要分，最多两段，中间空一行。句末不加句号，别啰嗦。';
       const atts = await qqImageAttachments(cfg, item);
       const res = await chatOnce(conv, ask, settings, { attachments: atts });
       // 一句一条地发，中间留点间隔，像人打字
-      const parts = qqSemanticParts(res.answer);
+      const parts = qqSemanticParts(res.answer, { maxParts: 3, paraMax: 140, lineMax: 90 });
       const ids = [];
       for (let i = 0; i < parts.length; i++) {
         if (i) await new Promise(r => setTimeout(r, 700));
