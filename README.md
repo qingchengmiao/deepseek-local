@@ -619,6 +619,7 @@ node tools/backfill-qq-images.mjs <会话id>          # 只看会补几张
 node tools/backfill-qq-images.mjs <会话id> --apply  # 真写
 ```
 
+**图片类型必须按文件头认**：QQ 给的 `content-type` 经常是 `application/octet-stream`，按扩展名硬写 `image/png` 就会拿一块「自称 png 的 jpeg」发给上游，模型那边解不出来，只能说「我看不到图」。`sniffImageMime(buf)` 读 `ff d8 ff` / `89 50 4e 47` / `GIF8` / `RIFF…WEBP` / `BM` 认类型，落盘和发请求都以它为准（`attachmentPayload` 也用它兜住老记录）。
 **还有一个隐性坑**：V4 Pro 是纯文本模型，对话里明明存着图它也看不见，就会答「我没有读图能力」。所以 `/api/chat` 和 QQ 的 `chatOnce` 都加了一条判断——**只要这段对话里存在图片附件，本轮就换到能看图的 Flash**，哪怕这张图是几轮之前发的。
 ## 几个实现上的坑（改代码时留意）
 

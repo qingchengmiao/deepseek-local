@@ -81,6 +81,11 @@ function startOnebot() {
       res.writeHead(200, { 'Content-Type': 'image/png', 'Content-Length': PNG.length });
       return res.end(PNG);
     }
+    if (req.url === '/wrong.png') {
+      // 内容其实是 PNG，但 content-type 谎称 jpeg —— 必须按文件头认，不能信它
+      res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Content-Length': PNG.length });
+      return res.end(PNG);
+    }
     const chunks = [];
     for await (const c of req) chunks.push(c);
     let body = {};
@@ -236,6 +241,22 @@ try {
   const lastUser = [...msgs2].reverse().find(m => m.role === 'user');
   const lastParts = Array.isArray(lastUser?.content) ? lastUser.content : [];
   check('最后一条 user 消息没有 image_url', !lastParts.find(p => p.type === 'image_url'), lastUser ? String(lastUser.content).slice(0, 30) : '');
+  console.log('\n7. content-type 撒谎时按文件头认类型');
+  ob.msgId += 1;
+  ob.history.push({
+    message_id: ob.msgId, time: Math.floor(Date.now() / 1000),
+    sender: { user_id: 3979605697, nickname: '青' },
+    message: [{ type: 'image', data: { file: 'wrong.image', url: `http://127.0.0.1:${OB_PORT}/wrong.png` } }],
+  });
+  await json('/api/qq/poll', { method: 'POST', body: {} });
+  const hist2 = await json('/api/conversations/' + convId);
+  const imgs = (hist2.data.conversation?.messages || []).flatMap(m => (m.attachments || []).filter(a => a.kind === 'image'));
+  const lastImg = imgs[imgs.length - 1];
+  check('存下来的 mime 是 image/png（按字节认，不信 jpeg 的谎）', lastImg?.mime === 'image/png', lastImg?.mime);
+  const chats3 = up.payloads.filter(p => p.url.includes('chat'));
+  const parts3 = (chats3[chats3.length - 1]?.body?.messages || []).flatMap(m => (Array.isArray(m.content) ? m.content : []));
+  const img3 = parts3.filter(p => p.type === 'image_url').pop();
+  check('发给上游的 data url 也是 png', /^data:image\/png;base64,/.test(img3?.image_url?.url || ''), String(img3?.image_url?.url || '').slice(0, 32));
 } catch (e) {
   fail += 1;
   console.log('  ✗ 异常：' + e.message);

@@ -1176,7 +1176,7 @@ async function qqImageAttachments(cfg, item, { limit = 4 } = {}) {
     try {
       const got = await qqImageBytes(cfg, ref);
       if (!got || !got.buf) continue;
-      let mime = got.mime;
+      let mime = sniffImageMime(got.buf) || got.mime;
       if (!(mime in QQ_IMAGE_EXT)) mime = 'image/png';
       const ext = QQ_IMAGE_EXT[mime];
       const uploadId = `${uid('u')}${ext}`;
@@ -2330,6 +2330,17 @@ async function readUpload(uploadId) {
   try { return { file, data: await fsp.readFile(file) }; } catch { return null; }
 }
 
+/** 看文件头认图片类型：QQ 那边给的 content-type 经常是 octet-stream，照它写 mime 会传成「假 png」 */
+function sniffImageMime(buf) {
+  if (!buf || !buf.length) return '';
+  if (buf.length > 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image/jpeg';
+  if (buf.length > 8 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'image/png';
+  if (buf.length > 6 && buf.toString('ascii', 0, 4) === 'GIF8') return 'image/gif';
+  if (buf.length > 12 && buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WEBP') return 'image/webp';
+  if (buf.length > 2 && buf[0] === 0x42 && buf[1] === 0x4d) return 'image/bmp';
+  return '';
+}
+
 /** 把附件的本地缓存转成请求里的 content 块 */
 async function attachmentPayload(att, toolsUsed) {
   if (!att || !att.uploadId) return null;
@@ -2338,7 +2349,7 @@ async function attachmentPayload(att, toolsUsed) {
     // 图片：base64 内联（模型能直接看；不用 Files API 免得占文档额度）
     const data = got ? got.data : null;
     if (!data) return null;
-    const mime = att.mime || MIME_BY_EXT[path.extname(att.uploadId).toLowerCase()] || 'image/png';
+    const mime = sniffImageMime(data) || att.mime || MIME_BY_EXT[path.extname(att.uploadId).toLowerCase()] || 'image/png';
     return { type: 'image_url', image_url: { url: `data:${mime};base64,${data.toString('base64')}`, detail: 'high' } };
   }
   if (att.fileId) return { type: 'file', file_id: att.fileId };
