@@ -808,3 +808,13 @@ node tools/shot-bigconv.mjs "http://127.0.0.1:8787" "c_perfbig1"
 - 关掉：设置页「允许模型自己调」取消勾选（`settings.selfTune=false`）→ 既不注入指令、也不再接受新的调整块，已经定下的口径也不再注入。
 - 接口：`GET /api/self-tune`（当前温度/三档口径/历史/enabled）、`POST /api/self-tune`（`{temperature, addendum:{human,qq,global}, why}`，`temperature:null` = 取消覆盖，空串 = 清掉那档）、`POST /api/self-tune/revert {id}`、`POST /api/self-tune/reset`。
 - 测试：`cd deepseek-app; node tools/self-tune-test.mjs`（24 项，假上游必须回 SSE —— server 是按 `\n\n` 切块读 `choices[0].delta.content` 的，回一次性 JSON 会正文为空）。截图：`node tools/shot-selftune.mjs`。
+
+## 本会话单独设上下文（2026-11-25 修）
+
+- 面板：「上下文与记忆」→「本会话上下文参数」，能给**单个会话**覆盖预算、热区比例、召回条数、半衰期、自动压缩、检索旧片段；点「保存到本会话」写进 `conv.ctx`，点「恢复跟随全局」清掉。
+- 以前的两个毛病（都修了）：
+  1. **预算只能从下拉里挑固定档**（24k / 64k / 128k / 256k / 512k / 1M），想填 200000 这种值根本没入口 —— 这就是「单独调整会话上下文长度会失败」的直接原因。现在换成数字输入框（`min=4000`、`max=budgetMax`、带 datalist 常用档），留空 = 跟随全局；超出范围的会被前端夹取并提示「预算收到 X（能填 4000 到 Y）」。
+  2. **回填只读全局值**：热区/召回/半衰期/两个开关以前一重开面板就显示成全局值，再点保存就把会话自己的覆盖写回全局值 —— 看起来像「设了没用」。现在按「覆盖值 ?? 全局值」回填（`eff()`），预算按 `ovl.ctxBudget` 回填。
+- 保存后 toast 会回显实际生效值（「已保存到这个会话：预算 20.0 万」/「预算跟随全局」），不用再开一次面板确认。
+- 服务端本来就支持任意合法预算（`normalizeCtxOverrides` 里 `ctxBudget` 夹到 4000–1000000 的整数），这次没改服务端，只把 UI 的入口和回填修对了。
+- 验证脚本（临时，已删）：CDP 探针在 `c_mEslcTXCJoga` 上设 `200000` + 热区 `0.5` → 服务端 `conv.ctx` 落库、重开面板仍显示覆盖值；「恢复跟随全局」→ `conv.ctx` 被删、面板回到全局值。

@@ -2514,10 +2514,12 @@ async function openContextPanel() {
     <div class="field">
       <label>本会话上下文参数${st.ctx && !st.ctx.followGlobal ? '（这个会话单独设了）' : '（现在跟随全局）'}</label>
       <div class="row">
-        <select id="ctxLocalBudget" style="flex:1">
-          <option value="">预算跟随全局（${fmtNum(st.budget)}）</option>
-          ${[24000, 64000, 128000, 256000, 512000, st.ctx?.budgetMax || 1000000].map(v => `<option value="${v}">${v >= 1000000 ? '1M' : Math.round(v / 1000) + 'k'}（${fmtNum(v)} token）</option>`).join('')}
-        </select>
+        <input id="ctxLocalBudget" type="number" min="4000" max="${st.ctx?.budgetMax || 1000000}" step="1000"
+               placeholder="跟随全局（${fmtNum(st.budget)}）" spellcheck="false" style="flex:1"
+               list="ctxBudgetPresets">
+        <datalist id="ctxBudgetPresets">
+          ${[24000, 64000, 128000, 256000, 512000, st.ctx?.budgetMax || 1000000].map(v => `<option value="${v}"></option>`).join('')}
+        </datalist>
       </div>
       <div class="ctx-local-grid">
         <label>热区比例<input id="ctxLocalHot" type="number" step="0.05" min="0.2" max="0.95"></label>
@@ -2532,7 +2534,7 @@ async function openContextPanel() {
         <button class="btn" data-x="saveCtx">保存到本会话</button>
         <button class="btn" data-x="resetCtx">恢复跟随全局</button>
       </div>
-      <div class="tip">1M 是 V4.1 Flash 的窗口上限；预算越小注意力越集中。这里只影响这一个会话。</div>
+      <div class="tip">预算可以直接填数（4000 到 ${fmtNum(st.ctx?.budgetMax || 1000000)}），下面几个是常用档；留空就是跟随全局。1M 是 V4.1 Flash 的窗口上限，预算越小注意力越集中。这里只影响这一个会话。</div>
     </div>
 
     <div class="field">
@@ -2554,15 +2556,17 @@ async function openContextPanel() {
 
   // 本会话参数：回填当前生效值（有覆盖就是覆盖值，没有就是全局值）
   const ovl = (st.ctx && st.ctx.overrides) || {};
-  const fillSel = body.querySelector('#ctxLocalBudget');
-  if (fillSel) fillSel.value = ovl.ctxBudget ? String(ovl.ctxBudget) : '';
+  // 以前这里一律回填全局值：会话自己设过热区/召回/半衰期的话，一重开面板就显示成全局值，
+  // 点保存又把它写回全局值 —— 看着就像「单独设了没用」。所以每个字段都按 覆盖值 ?? 全局值 回填。
+  const eff = k => (ovl[k] !== undefined && ovl[k] !== null ? ovl[k] : st.settings[k]);
   const fillNum = (sel, v) => { const el = body.querySelector(sel); if (el) el.value = String(v); };
-  fillNum('#ctxLocalHot', st.settings.ctxHotRatio);
-  fillNum('#ctxLocalTopK', st.settings.ctxTopK);
-  fillNum('#ctxLocalHalf', st.settings.ctxHalfLifeDays);
+  fillNum('#ctxLocalBudget', ovl.ctxBudget !== undefined && ovl.ctxBudget !== null ? ovl.ctxBudget : '');
+  fillNum('#ctxLocalHot', eff('ctxHotRatio'));
+  fillNum('#ctxLocalTopK', eff('ctxTopK'));
+  fillNum('#ctxLocalHalf', eff('ctxHalfLifeDays'));
   const fillChk = (sel, v) => { const el = body.querySelector(sel); if (el) el.checked = v !== false; };
-  fillChk('#ctxLocalCompress', st.settings.ctxCompress);
-  fillChk('#ctxLocalRag', st.settings.ctxRag);
+  fillChk('#ctxLocalCompress', eff('ctxCompress'));
+  fillChk('#ctxLocalRag', eff('ctxRag'));
 
   body.querySelector('#ctxPreview').addEventListener('click', async e => {
     const hits = body.querySelector('#ctxHits');
@@ -2629,7 +2633,8 @@ async function openContextPanel() {
         await api('/api/conversations/' + S.conv.id + '/context/reset', { method: 'POST' });
         toast('记忆已清空');
       } else if (act === 'saveCtx') {
-        const budget = body.querySelector('#ctxLocalBudget').value;
+        const budgetEl = body.querySelector('#ctxLocalBudget');
+        const maxBudget = st.ctx?.budgetMax || 1000000;
         const ctx = {
           ctxHotRatio: Number(body.querySelector('#ctxLocalHot').value),
           ctxTopK: Number(body.querySelector('#ctxLocalTopK').value),
@@ -2637,9 +2642,21 @@ async function openContextPanel() {
           ctxCompress: body.querySelector('#ctxLocalCompress').checked,
           ctxRag: body.querySelector('#ctxLocalRag').checked,
         };
-        if (budget) ctx.ctxBudget = Number(budget);
-        await api('/api/conversations/' + S.conv.id, { method: 'PATCH', body: { ctx } });
-        toast('已保存到这个会话');
+        const raw = String(budgetEl.value || '').trim();
+        if (raw) {
+          const n = Math.round(Number(raw));
+          const clamped = Number.isFinite(n) ? Math.min(maxBudget, Math.max(4000, n)) : 0;
+          if (clamped !== n) {
+            budgetEl.value = String(clamped);
+            toast(`预算收到 ${fmtNum(clamped)}（能填 4000 到 ${fmtNum(maxBudget)}）`, 5000);
+          }
+          ctx.ctxBudget = clamped;
+        }
+        const r = await api('/api/conversations/' + S.conv.id, { method: 'PATCH', body: { ctx } });
+        const savedCtx = (r && r.conversation && r.conversation.ctx) || {};
+        toast(savedCtx.ctxBudget
+          ? `已保存到这个会话：预算 ${fmtNum(savedCtx.ctxBudget)}`
+          : '已保存到这个会话：预算跟随全局');
       } else if (act === 'resetCtx') {
         await api('/api/conversations/' + S.conv.id, { method: 'PATCH', body: { ctx: {} } });
         toast('已恢复跟随全局');
