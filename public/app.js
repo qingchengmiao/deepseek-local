@@ -2974,6 +2974,7 @@ function bindEvents() {
   $('#pluginsBtn').addEventListener('click', openPluginsPage);
   $('#importNavBtn').addEventListener('click', openImportPage);
   $('#skillsNavBtn').addEventListener('click', openSkillsPage);
+$('#learnNavBtn').addEventListener('click', openLearnPage);
   $('#pageBack').addEventListener('click', () => setView('chat'));
   $('#pageBackBtn').addEventListener('click', () => setView('chat'));
 
@@ -3216,7 +3217,7 @@ async function loadCalendarState() {
 /* ------------------------------------------------------------------ 整页视图 */
 
 const VIEW_TITLES = {
-  chat: '', day: '日历 · 时钟', qq: 'QQ 通道', plugins: '插件与通道', import: '导入对话', skills: '技能包', settings: '设置',
+  chat: '', day: '日历 · 时钟', qq: 'QQ 通道', plugins: '插件与通道', import: '导入对话', skills: '技能包', learn: '自学习', settings: '设置',
 };
 
 // 右下角吉祥物：点一下说句话，换页时让开
@@ -3251,7 +3252,7 @@ function setView(view) {
   S.view = view;
   $('#chatView').classList.toggle('hidden', view !== 'chat');
   $('#pageView').classList.toggle('hidden', view === 'chat');
-  for (const [id, v] of [['clockBtn', 'day'], ['qqNavBtn', 'qq'], ['pluginsBtn', 'plugins'], ['importNavBtn', 'import'], ['skillsNavBtn', 'skills'], ['settingsBtn', 'settings']]) {
+  for (const [id, v] of [['clockBtn', 'day'], ['qqNavBtn', 'qq'], ['pluginsBtn', 'plugins'], ['importNavBtn', 'import'], ['skillsNavBtn', 'skills'], ['learnNavBtn', 'learn'], ['settingsBtn', 'settings']]) {
     $('#' + id)?.classList.toggle('on', view === v);
   }
   document.title = view === 'chat' ? 'DeepSeek Local' : `${VIEW_TITLES[view] || ''} · DeepSeek Local`;
@@ -3790,6 +3791,269 @@ async function uploadSkills(items) {
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
   return data;
+}
+
+// ---------------------------------------------------------------- 自学习（群聊说话画像）
+const LEARN = { gid: '', data: null, status: null };
+
+function learnNum(v, digits = 1, unit = '') {
+  if (v === null || v === undefined || Number.isNaN(Number(v))) return '—';
+  const n = Number(v);
+  return `${n.toFixed(digits)}${unit}`;
+}
+function learnPct(v) {
+  if (v === null || v === undefined) return '—';
+  return `${(Number(v) * 100).toFixed(0)}%`;
+}
+function learnMetric(label, value, hint = '') {
+  return `<div class="lt-metric"><span class="lt-k">${esc(label)}</span><b class="lt-v">${esc(value)}</b>${hint ? `<i class="lt-h">${esc(hint)}</i>` : ''}</div>`;
+}
+
+function learnGraphSvg(d) {
+  const nodes = (d.peopleTop || []).slice(0, 10);
+  const edges = (d.graph && d.graph.edges) || [];
+  if (nodes.length < 2) return '<p class="muted">人太少，画不出关系图（至少两个人互相说话才有边）。</p>';
+  const W = 720, H = 300, cx = W / 2, cy = H / 2, R = Math.min(W, H) / 2 - 52;
+  const pos = new Map();
+  nodes.forEach((n, i) => {
+    const ang = (Math.PI * 2 * i) / nodes.length - Math.PI / 2;
+    pos.set(n.uid, { x: cx + R * Math.cos(ang), y: cy + R * Math.sin(ang), n });
+  });
+  const maxCount = Math.max(1, ...edges.map((e) => e.count || 1));
+  const lines = edges.filter((e) => pos.has(e.from) && pos.has(e.to)).map((e) => {
+    const a = pos.get(e.from), b = pos.get(e.to);
+    const w = 1 + 4 * Math.sqrt((e.count || 1) / maxCount);
+    const gapTxt = e.medianGapS ? `${Math.round(e.medianGapS)}s` : '';
+    return `<line x1="${a.x.toFixed(1)}" y1="${a.y.toFixed(1)}" x2="${b.x.toFixed(1)}" y2="${b.y.toFixed(1)}" stroke="var(--border-strong,#c9d1de)" stroke-width="${w.toFixed(2)}" opacity="0.55"><title>${esc(`${a.n.nick || a.n.uid} → ${b.n.nick || b.n.uid}：${e.count} 次，中位间隔 ${gapTxt}`)}</title></line>`;
+  }).join('');
+  const dots = nodes.map((n) => {
+    const p = pos.get(n.uid);
+    const r = 14 + Math.min(14, Math.sqrt((n.msgs || 1)) * 1.2);
+    return `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="${r.toFixed(1)}" fill="var(--accent,#4c7df0)" opacity="0.16"></circle>`
+      + `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="4" fill="var(--accent,#4c7df0)"></circle>`
+      + `<text x="${p.x.toFixed(1)}" y="${(p.y + r + 13).toFixed(1)}" text-anchor="middle" font-size="12" fill="var(--text-2,#5b6472)">${esc(n.nick || n.uid)}</text>`;
+  }).join('');
+  return `<svg class="lt-graph" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">${lines}${dots}</svg>`;
+}
+
+function learnCurveSvg(d) {
+  const series = d.series || [];
+  if (series.length < 2) return '<p class="muted">消息还不够，情绪曲线先空着（每 25 条一个点）。</p>';
+  const W = 720, H = 160, pad = 18;
+  const ys = series.map((s) => Math.max(-3, Math.min(3, Number(s.mean) || 0)));
+  const x = (i) => pad + (i * (W - pad * 2)) / Math.max(1, series.length - 1);
+  const y = (v) => pad + ((3 - v) / 6) * (H - pad * 2);
+  const pts = ys.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
+  const zero = y(0).toFixed(1);
+  const spikes = (d.sentiment && d.sentiment.spikes) || [];
+  const dots = series.map((s, i) => {
+    const v = Math.max(-3, Math.min(3, Number(s.mean) || 0));
+    const hot = Math.abs(v) >= 1.2;
+    return `<circle cx="${x(i).toFixed(1)}" cy="${y(v).toFixed(1)}" r="${hot ? 3.6 : 2.2}" fill="${hot ? 'var(--danger,#d9534f)' : 'var(--accent,#4c7df0)'}" opacity="${hot ? 0.95 : 0.6}"><title>${esc(`第 ${s.i} 条起 25 条，平均情绪 ${v}｜${s.label || ''}`)}</title></circle>`;
+  }).join('');
+  return `<svg class="lt-curve" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">`
+    + `<line x1="${pad}" y1="${zero}" x2="${W - pad}" y2="${zero}" stroke="var(--border,#e3e7ee)" stroke-dasharray="4 4"></line>`
+    + `<polyline points="${pts}" fill="none" stroke="var(--accent,#4c7df0)" stroke-width="1.8"></polyline>${dots}</svg>`
+    + `<p class="lt-note">每 25 条一个点，中线是 0；红点是这一段平均情绪绝对值 ≥1.2 的地方（${spikes.length} 个单条突变已单独统计）。</p>`;
+}
+
+function learnPageHtml() {
+  return `
+<div class="wrap">
+  <div class="lt-panel">
+    <div class="lt-head">
+      <div>
+        <h3>从群里学说话</h3>
+        <p class="muted">只读群消息，落在本机 <code>data/qq-learn</code>；一个群一条 JSONL，按星期自动结算。数据和这个群本身的配置都不出这台机器。</p>
+      </div>
+      <div class="lt-switches">
+        <label class="switch-row"><span>自动采集<small>10 分钟一轮</small></span><input type="checkbox" id="ltAuto"></label>
+        <label class="switch-row"><span>对话里带上画像<small>绑了群号的会话</small></span><input type="checkbox" id="ltInject"></label>
+      </div>
+    </div>
+    <div class="lt-actions">
+      <button class="btn" data-x="ltGroups">刷新群列表</button>
+      <button class="btn" data-x="ltIngest">抽一批消息</button>
+      <button class="btn" data-x="ltSettle">结算本周</button>
+      <span class="muted" id="ltHint">正在读…</span>
+    </div>
+    <div id="ltGroupList" class="lt-group-list"></div>
+  </div>
+  <div id="ltBody"></div>
+</div>`;
+}
+
+async function openLearnPage() {
+  const { body } = pageShell('自学习', '按语境、人物、时间学一个群怎么说话：句长、语气词、省略主语、回复关系、情绪走势、内部梗。', learnPageHtml(), 'learn');
+  const paintGroups = async () => {
+    const st = await api('/api/learn/status');
+    LEARN.status = st;
+    const auto = body.querySelector('#ltAuto');
+    const inj = body.querySelector('#ltInject');
+    if (auto) auto.checked = st.auto !== false;
+    if (inj) inj.checked = st.inject === true;
+    const host = body.querySelector('#ltGroupList');
+    if (!host) return;
+    const list = st.store || [];
+    if (!list.length) {
+      host.innerHTML = '<p class="muted">还没有群。先点「刷新群列表」，要保证隔离实例在线、那个号在群里。</p>';
+      return;
+    }
+    const wanted = new Set(st.wanted || []);
+    const cur = LEARN.gid || (st.wanted || [])[0] || '';
+    host.innerHTML = list.map((g) => {
+      const on = wanted.has(g.gid) || !(st.wanted || []).length;
+      return `<div class="lt-group${cur === g.gid ? ' on' : ''}" data-gid="${esc(g.gid)}">
+        <label class="lt-g-main"><input type="checkbox" class="lt-g-pick" value="${esc(g.gid)}" ${on ? 'checked' : ''}>
+          <span class="lt-g-name">${esc(g.name || g.gid)}</span>
+          <span class="lt-g-meta">${esc(g.gid)} · ${g.count} 条</span>
+        </label>
+        <button class="btn ghost" data-x="ltOpen" data-gid="${esc(g.gid)}">看这个群</button>
+      </div>`;
+    }).join('');
+    const hint = body.querySelector('#ltHint');
+    if (hint) {
+      const s = st.state || {};
+      hint.textContent = `共 ${list.length} 个群 · 已存 ${list.reduce((a, g) => a + (g.count || 0), 0)} 条`
+        + (s.lastIngestAt ? ` · 上次采集 ${new Date(s.lastIngestAt).toLocaleTimeString()}` : ' · 还没采过')
+        + (s.lastError ? ` · 上次出错：${s.lastError}` : '');
+    }
+  };
+  const paintAnalysis = async (gid) => {
+    const host = body.querySelector('#ltBody');
+    if (!host) return;
+    if (!gid) { host.innerHTML = '<div class="lt-panel"><p class="muted">先选一个群。</p></div>'; return; }
+    host.innerHTML = '<div class="lt-panel"><p class="muted">算着…</p></div>';
+    let d;
+    try {
+      d = await api(`/api/learn/analysis?gid=${encodeURIComponent(gid)}`);
+    } catch (e) {
+      host.innerHTML = `<div class="lt-panel"><p class="muted">读失败：${esc(e.message)}</p></div>`;
+      return;
+    }
+    LEARN.gid = gid;
+    LEARN.data = d;
+    if (d.empty) {
+      host.innerHTML = '<div class="lt-panel"><p class="muted">这个群还没采到消息。点上面「抽一批消息」。</p></div>';
+      return;
+    }
+    const o = d.overall || {};
+    const rh = d.rhythm || {};
+    const at = (d.atBehavior || [])[0] || {};
+    const base = typeof d.sentiment?.base === 'number' ? d.sentiment.base : null;
+    const memes = (d.memes || []).slice(0, 12);
+    const weeks = d.weeks || [];
+    host.innerHTML = `
+<div class="lt-panel">
+  <h3>${esc(d.nick || d.gid)} <small class="muted">${d.count} 条 · ${d.people} 人 · 跨度 ${learnNum((d.spanS || 0) / 86400, 1, ' 天')}</small></h3>
+  <div class="lt-metrics">
+    ${learnMetric('句长中位', learnNum(o.charsMedian, 1, ' 字'))}
+    ${learnMetric('短句占比', learnPct(o.shortRatio), '≤8 字')}
+    ${learnMetric('语气词密度', learnNum(o.modalPer100, 2), '每 100 字')}
+    ${learnMetric('省略主语', learnPct(o.proDropRatio))}
+    ${learnMetric('不写句末标点', learnPct(o.noEndPunctRatio))}
+    ${learnMetric('逗号密度', learnNum(o.commaPer100, 2), '每 100 字')}
+    ${learnMetric('被引用', learnNum(o.replyPer100Msgs, 1), '每 100 条')}
+    ${learnMetric('@ 后回复率', learnPct(at.replyRate), at.medianReplyS ? `中位 ${Math.round(at.medianReplyS)} 秒` : '')}
+    ${learnMetric('接话间隔中位', learnNum(rh.gapMedianS, 0, ' 秒'))}
+    ${learnMetric('平均情绪', learnNum(base, 2), '−3…3')}
+  </div>
+</div>
+<div class="lt-panel">
+  <h3>谁接谁的话</h3>
+  <p class="muted">线越粗=接得越多；圆点越大=话越多。鼠标停上去看次数和中位间隔。</p>
+  ${learnGraphSvg(d)}
+</div>
+<div class="lt-panel">
+  <h3>情绪走势</h3>
+  ${learnCurveSvg(d)}
+</div>
+<div class="lt-panel">
+  <h3>在用的内部梗 <small class="muted">${memes.length} 个</small></h3>
+  ${memes.length ? `<div class="lt-memes">${memes.map((m) => `<span class="lt-meme"><b>${esc(m.phrase)}</b><i>${m.count} 次 / ${m.senders} 人 / ${m.activeDays} 天</i></span>`).join('')}</div>` : '<p class="muted">还没形成稳定的梗（要出现 ≥5 次、≥3 个人在用）。</p>'}
+</div>
+<div class="lt-panel">
+  <h3>周报 <small class="muted">自动结算</small></h3>
+  ${weeks.length ? `<div class="lt-weeks">${weeks.map((w) => `<button class="btn ghost lt-week" data-week="${esc(w.week)}" data-gid="${esc(w.gid)}">${esc(w.week)} · ${w.msgs} 条${w.closed ? '' : '（进行中）'}</button>`).join('')}</div><pre class="lt-week-body" id="ltWeekBody"></pre>` : '<p class="muted">还没结算过。点上面「结算本周」。</p>'}
+</div>`;
+  };
+
+  body.addEventListener('change', async (e) => {
+    const t = e.target;
+    if (!t || !t.id) return;
+    if (t.id === 'ltAuto') {
+      await api('/api/settings', { method: 'PUT', body: { learnAuto: !!t.checked } }).catch((err) => toast(err.message));
+      toast(t.checked ? '自动采集开了' : '自动采集关了');
+    }
+    if (t.id === 'ltInject') {
+      await api('/api/settings', { method: 'PUT', body: { learnInject: !!t.checked } }).catch((err) => toast(err.message));
+      toast(t.checked ? '绑了群号的会话会带上这个群的画像' : '不再带画像');
+    }
+  });
+  body.addEventListener('click', async (e) => {
+    const btn = e.target.closest('[data-x]');
+    const week = e.target.closest('.lt-week');
+    if (week) {
+      const pre = body.querySelector('#ltWeekBody');
+      pre.textContent = '读着…';
+      try {
+        const r = await api(`/api/learn/week?gid=${encodeURIComponent(week.dataset.gid)}&week=${encodeURIComponent(week.dataset.week)}`);
+        pre.textContent = r.markdown || '';
+      } catch (err) {
+        pre.textContent = `读不到：${err.message}`;
+      }
+      return;
+    }
+    const grp = e.target.closest('.lt-group');
+    if (btn && btn.dataset.x === 'ltOpen') {
+      body.querySelectorAll('.lt-group').forEach((n) => n.classList.remove('on'));
+      if (grp) grp.classList.add('on');
+      await paintAnalysis(btn.dataset.gid);
+      return;
+    }
+    if (!btn) return;
+    const act = btn.dataset.x;
+    if (act === 'ltGroups') {
+      btn.disabled = true;
+      try {
+        await api('/api/learn/groups', { method: 'POST', body: {} });
+        await paintGroups();
+        toast('群列表刷新了');
+      } catch (err) {
+        toast(`刷新失败：${err.message}`);
+      } finally { btn.disabled = false; }
+    }
+    if (act === 'ltIngest') {
+      btn.disabled = true;
+      btn.textContent = '抽着…';
+      try {
+        const r = await api('/api/learn/ingest', { method: 'POST', body: {} });
+        const added = (r.result || []).reduce((a, x) => a + (x.added || 0), 0);
+        const bad = (r.result || []).find((x) => x.failed);
+        toast(bad ? `抽到 ${added} 条，但出错了：${bad.failed}` : `抽到 ${added} 条新消息`);
+        await paintGroups();
+        if (LEARN.gid) await paintAnalysis(LEARN.gid);
+      } catch (err) {
+        toast(`抽取失败：${err.message}`);
+      } finally { btn.disabled = false; btn.textContent = '抽一批消息'; }
+    }
+    if (act === 'ltSettle') {
+      btn.disabled = true;
+      try {
+        const r = await api('/api/learn/settle', { method: 'POST', body: {} });
+        toast(`结算了 ${(r.settled || []).length} 个周报`);
+        if (LEARN.gid) await paintAnalysis(LEARN.gid);
+      } catch (err) {
+        toast(`结算失败：${err.message}`);
+      } finally { btn.disabled = false; }
+    }
+  });
+
+  await paintGroups();
+  const firstGid = LEARN.gid || ((LEARN.status && LEARN.status.store && LEARN.status.store[0] && LEARN.status.store[0].gid) || '');
+  LEARN.gid = firstGid;
+  if (firstGid) await paintAnalysis(firstGid);
+  else body.querySelector('#ltBody').innerHTML = '<div class="lt-panel"><p class="muted">还没有可看的群。</p></div>';
 }
 
 async function openSkillsPage() {

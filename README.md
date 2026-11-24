@@ -585,6 +585,19 @@ pwsh -NoProfile -File tools\_run-fresh.ps1 -Tests qq-test,context-test,route-tes
 
 ---
 
+## 自学习：从群聊里学一个群怎么说话（2026-11-25 加）
+
+一个群一条 JSONL，落在本机数据目录的 `qq-learn/<群号>/messages.jsonl`，不联网、不外传。
+
+页面：侧栏「学习」。里面能刷新群列表、抽一批消息、结算本周、看某个群的画像与关系图。
+
+- 抽消息：OneBot `get_group_msg_history` 往更早翻页（默认 2 页 × 100 条，最多 20 页），按 `message_id` 去重落盘
+- 自动跑：`learnAuto` 打开时每 10 分钟抽一轮；`learnInject` 打开时，绑了群号的会话会在 system 里多一段这个群的说话画像（600 字以内）
+- 周结算：一周一份 json + md，落在 `qq-learn/weeks/<群号>__<周>.json|.md`；本周还没长完就不覆盖
+- 八个接口：`GET /api/learn/status`、`POST /api/learn/groups`、`POST /api/learn/ingest`、`GET /api/learn/analysis`、`POST /api/learn/settle`、`GET /api/learn/weeks`、`GET /api/learn/week`、`GET /api/learn/profile`
+- 测：`node tools\learn-service-test.mjs`（48 项，假 OneBot 造 120 条两周数据）、`node tools\qq-learn-test.mjs`（57 项，纯函数层）；截图 `node tools\shot-learn-page.mjs`
+
+数据侧现在还跑不起来：隔离实例要在线（`phase=online`）并且这个号得在群里，否则 `/api/learn/groups` 返回空。
 ## 几个实现上的坑（改代码时留意）
 
 - **带 `tools` 的请求必须回传历轮的 `reasoning_content`，否则 400**；不带 tools 时反而不能传（传了也被忽略）。所以 `buildMessages` 只在联网时才把思考内容拼回历史。

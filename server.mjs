@@ -61,6 +61,8 @@ import {
   scheduleText,
 } from './calendar.mjs';
 import { qqConfig, onebot, loginInfo, sendPrivate, sendGroup, friendHistory, groupHistory, pickNew, qqUserPrompt } from './qq.mjs';
+import { createLearnService } from './learn-service.mjs';
+import { isoWeek } from './qqgroup.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -535,6 +537,14 @@ const DEFAULT_SETTINGS = {
   // ---- 推送：允许应用主动往 QQ 推消息（一道权限门，关掉后推送接口一律 403）
   pushEnabled: true,
   pushUid: '', // 推给谁；空 = 回落到 qqUid
+  // ---- 群聊自学习：按语境/人物/时间学一团人怎么说话（数据只留在本机 data/qq-learn）
+  learnAuto: true, // 后台每 10 分钟抽一批群消息
+  learnInject: false, // 打开后，绑了群号的会话会带上这个群的说话画像
+  learnGroups: [], // 要学的群号；空 = 已存过的全部
+  learnGroupMeta: {}, // { gid: { name, members } }
+  learnN: 6, // 情绪突变看的后续条数
+  learnPages: 2, // 每轮翻几页历史
+  learnLastSettledWeek: '', // 上次跨周结算的周
 };
 
 // ---------------------------------------------------------------- 小工具
@@ -786,6 +796,27 @@ async function saveSettings(patch) {
       const arr = Array.isArray(v) ? v : [];
       next.enabledSkills = [...new Set(arr.map(x => String(x || '').trim()).filter(x => ids.has(x)))];
     }
+    else if (k === 'learnGroups') {
+      const arr = Array.isArray(v) ? v : [];
+      next.learnGroups = [...new Set(arr.map(x => String(x || '').replace(/[^0-9A-Za-z_-]/g, '')).filter(Boolean))].slice(0, 50);
+    }
+    else if (k === 'learnGroupMeta') {
+      const src = v && typeof v === 'object' ? v : {};
+      const out = {};
+      for (const [gid, meta] of Object.entries(src)) {
+        const g = String(gid || '').replace(/[^0-9A-Za-z_-]/g, '');
+        if (!g) continue;
+        out[g] = {
+          name: String((meta && meta.name) || '').slice(0, 80),
+          members: meta && meta.members != null ? Math.max(0, Math.floor(Number(meta.members) || 0)) : null,
+        };
+        if (Object.keys(out).length >= 200) break;
+      }
+      next.learnGroupMeta = out;
+    }
+    else if (k === 'learnN') next.learnN = Math.max(1, Math.min(30, Math.floor(Number(v) || 6)));
+    else if (k === 'learnPages') next.learnPages = Math.max(1, Math.min(20, Math.floor(Number(v) || 2)));
+    else if (k === 'learnLastSettledWeek') next.learnLastSettledWeek = String(v || '').slice(0, 20);
     else if (typeof v === 'boolean') next[k] = v;
     else next[k] = v;
   }
@@ -928,6 +959,18 @@ function effQqConfig(settings = {}) {
   const port = Number(settings.napcatHttpPort) || 3200;
   return { ...base, baseUrl: `http://127.0.0.1:${port}` };
 }
+
+// 群聊自学习：数据落在 <DATA>/qq-learn，跟着应用数据目录走（覆盖 dist 代码不会丢）
+const learn = createLearnService({
+  dataDir: DATA,
+  onebot,
+  // 设置是异步读的；这里把「实际生效的 OneBot 地址」一并塞进去（隔离实例是 3200，不是 3000）
+  getSettings: async () => {
+    const s = await loadSettings();
+    return { ...s, __qq: effQqConfig(s) };
+  },
+  saveSettings: (patch) => saveSettings(patch),
+});
 async function qqStatus() {
   const settings = await loadSettings();
   const cfg = effQqConfig(settings);
@@ -1737,6 +1780,36 @@ function startHealLoop() {
     napcatHealOnce().catch(() => null);
   }, 90 * 1000);
   if (healTimer.unref) healTimer.unref();
+}
+
+// 群聊自学习：10 分钟抽一轮历史（只在实例在线、设了群、没关自动时才真干活）
+let learnTimer = null;
+let learnBusy = false;
+function startLearnLoop() {
+  if (learnTimer) return;
+  learnTimer = setInterval(async () => {
+    if (learnBusy) return;
+    learnBusy = true;
+    try {
+      const r = await learn.tick({ pages: (await loadSettings()).learnPages || 2 });
+      if (r && (r.added || r.settled)) log(`自学习：新增 ${r.added || 0} 条消息，结算 ${r.settled || 0} 个周报`);
+    } catch (e) {
+      log('自学习这一轮跳过：', e.message);
+    } finally {
+      learnBusy = false;
+    }
+  }, 10 * 60 * 1000);
+  if (learnTimer.unref) learnTimer.unref();
+  // 起来先跑一次（不阻塞启动）
+  setTimeout(() => {
+    if (learnBusy) return;
+    learnBusy = true;
+    learn.tick({ pages: 1 }).catch(() => null).finally(() => { learnBusy = false; });
+  }, 20 * 1000).unref?.();
+}
+function stopLearnLoop() {
+  if (learnTimer) clearInterval(learnTimer);
+  learnTimer = null;
 }
 
 // ---------------------------------------------------------------- 通道总览（插件页）
@@ -3605,6 +3678,17 @@ async function buildMessages(conv, settings, { withTools = false } = {}) {
     meta.skills = (settings.enabledSkills || []).slice();
   }
 
+  // 群聊自学习：会话如果绑了某个群，就带上那群人说话的画像（句长/语气词/省略主语/节奏/在用的梗）
+  if (settings.learnInject === true && conv.qqGid) {
+    try {
+      const prof = await learn.profileFor({ gid: String(conv.qqGid), maxChars: 600 });
+      if (prof) {
+        out.push({ role: 'system', content: prof });
+        meta.learn = { gid: String(conv.qqGid), chars: prof.length };
+      }
+    } catch { /* 画像拿不到就当没开 */ }
+  }
+
   // 日历：把今天 / 接下来几天的日程带上（模型能主动说「你下午三点有会」）
   if (settings.calendarInContext !== false) {
     try {
@@ -4787,6 +4871,67 @@ async function handleApi(req, res, url) {
     return sendJson(res, 200, { models: MODELS });
   }
 
+  // ---------------- 群聊自学习（说话画像来自真实群聊，数据只在 data/qq-learn）
+  if (pathname === '/api/learn/status' && method === 'GET') {
+    return sendJson(res, 200, await learn.status());
+  }
+  if (pathname === '/api/learn/groups' && method === 'POST') {
+    try {
+      const groups = await learn.refreshGroups();
+      return sendJson(res, 200, { ok: true, groups });
+    } catch (e) {
+      return sendJson(res, 400, { error: e.message });
+    }
+  }
+  if (pathname === '/api/learn/ingest' && method === 'POST') {
+    let body = {};
+    try { body = await readBody(req, 64 * 1024); } catch { body = {}; }
+    try {
+      const r = await learn.ingest({
+        gids: Array.isArray(body.gids) ? body.gids : null,
+        pages: Number(body.pages) || 3,
+      });
+      return sendJson(res, 200, { ok: true, result: r, status: await learn.status() });
+    } catch (e) {
+      return sendJson(res, 400, { error: e.message });
+    }
+  }
+  if (pathname === '/api/learn/analysis' && method === 'GET') {
+    const q = url.searchParams;
+    return sendJson(res, 200, await learn.analysisFor({
+      gid: q.get('gid') || '',
+      since: Number(q.get('since')) || 0,
+      until: Number(q.get('until')) || 0,
+      n: Number(q.get('n')) || 6,
+    }));
+  }
+  if (pathname === '/api/learn/settle' && method === 'POST') {
+    let body = {};
+    try { body = await readBody(req, 64 * 1024); } catch { body = {}; }
+    const done = await learn.settle({
+      gids: Array.isArray(body.gids) ? body.gids : null,
+      force: body.force === true,
+    });
+    return sendJson(res, 200, { ok: true, settled: done, weeks: learn.listWeeks().slice(0, 12) });
+  }
+  if (pathname === '/api/learn/weeks' && method === 'GET') {
+    return sendJson(res, 200, { weeks: learn.listWeeks({ gid: url.searchParams.get('gid') || '' }) });
+  }
+  if (pathname === '/api/learn/week' && method === 'GET') {
+    const gid = url.searchParams.get('gid') || '';
+    const week = url.searchParams.get('week') || '';
+    const md = gid && week ? learn.weekMarkdown(gid, week) : null;
+    if (!md) return sendJson(res, 404, { error: '这一周的周报还没结算' });
+    return sendJson(res, 200, { gid, week, markdown: md });
+  }
+  if (pathname === '/api/learn/profile' && method === 'GET') {
+    const md = await learn.profileFor({
+      gid: url.searchParams.get('gid') || '',
+      maxChars: Number(url.searchParams.get('max')) || 600,
+    });
+    return sendJson(res, 200, { profile: md });
+  }
+
   // ---------------- 技能包（skills/<id>/SKILL.md）
   if (pathname === '/api/skills' && method === 'GET') {
     const settings = await loadSettings();
@@ -5754,10 +5899,12 @@ async function main() {
 
   startQQBridge();
   startHealLoop(); // 隔离实例的自动纠错（90 秒一轮，设置里 napcatAutoHeal 可关）
+  startLearnLoop(); // 群聊自学习：10 分钟抽一轮、跨周自动结算（设置里 learnAuto 可关）
 
   const shutdown = async () => {
     log('正在关闭…');
     stopQQBridge();
+    stopLearnLoop();
     server.close();
     try { await fsp.unlink(RUNTIME_FILE); } catch {}
     setTimeout(() => process.exit(0), 300).unref();
