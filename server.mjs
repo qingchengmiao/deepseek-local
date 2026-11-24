@@ -1024,6 +1024,9 @@ async function vectorRefresh({ force = false } = {}) {
     const r = await vectorIndex.refresh({ force });
     vectorBuiltAt = Date.now();
     log(`检索索引：${r.entries} 片段 / ${r.conversations} 会话 · 建库 ${Date.now() - t0}ms`);
+    // 预热：矩阵和倒排是第一次搜索时才解出来的（17MB 索引解压约 600ms），
+    // 不预热的话重启后第一个搜索的人要替所有人付这笔钱。
+    vectorIndex.search('预热').catch(() => {});
     return r;
   } catch (e) {
     log('检索索引建库失败（不影响对话）：', e.message);
