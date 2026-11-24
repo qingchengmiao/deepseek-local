@@ -838,3 +838,14 @@ node tools/shot-bigconv.mjs "http://127.0.0.1:8787" "c_perfbig1"
 - 接口：`GET /api/ctx-presets?conversationId=<id>`（预设表 + 全局/会话当前档 + `effective`）、`POST /api/ctx-presets/apply`（`{presetId, conversationId?}`；给 conversationId 就改会话并清掉 `conv.ctx` 手工覆盖，不给就改全局）、`PATCH /api/conversations/<id> {ctxPreset}`（`''` 或非法 id 会清掉）。`GET /api/conversations/<id>/context` 的生效预算在**顶层 `budget`**，`ctx` 里放 `followGlobal / overrides / preset / globalPreset`。
 - 测试：`cd deepseek-app; node tools/ctx-preset-test.mjs`（29 项，走隔离实例 18961 + `DSAPP_DATA` 临时目录，上游地址故意填不通的 `127.0.0.1:1` —— 这个测试不发模型请求）。
 - 截图：`node tools/shot-preset.mjs`（会话面板 `data/shots/112-面板-记忆预设.png`、设置页 `data/shots/113-设置-全局记忆预设.png`）。
+
+## 侧栏「调」弹窗（2026-11-25 修）
+
+侧栏每个会话右边的「调」按钮弹出的小窗（`openTunePopover`），改模型 / 标题 / 上下文预算 / 召回条数 / 半衰期。这里以前有两个**一直没暴露**的毛病，加上用户报的那次崩溃：
+
+1. **保存分支末尾调了 `renderConversations()`，这个函数根本不存在**（真名是 `renderSidebar()`）。`api PATCH` 已经成功、`refreshState()` 也跑完了，才在最后一行抛 `ReferenceError` → toast 显示「改失败：renderConversations is not defined」，看着像没保存，其实库已经写好。改成 `renderSidebar()`。
+2. **上下文参数一直是发短名**（`ctx.budget / topK / halfLifeDays`），服务端 `normalizeCtxOverrides()` 只认 `ctxBudget / ctxTopK / ctxHalfLifeDays` → 被静默丢掉，**这个弹窗的上下文设置从来没生效过**；回填也读短名，所以永远显示空。现在发送和回填都用长名。
+3. 预算控件原来是原生 `<select>`（就是「下拉窗口里调整失败」的那类），换成数字输入框（4000–1000000，留空 = 跟随全局），旁边一行提示常用档。
+
+- 「三项全留空 → 保存」= 回跟随全局：服务端 `PATCH` 收到 `ctx: {}` 会 `delete conv.ctx`，手工覆盖整条撤掉。
+- 验证：`node tools/shot-tune-pop.mjs` —— CDP 起临时会话，点「调」→ 填 `200000` → 保存读 toast → 重开读回显 → 清空再保存 → 删临时会话。实测输出 `保存 200000: {"toast":"改好了：预算 200k","ctx":{"ctxBudget":200000}}`、`重开回显: {"budget":"200000"}`、`清空回全局: {"toast":"改好了：上下文回到跟随全局","ctx":null}`。截图 `data/shots/114-调这个会话-弹窗.png`。

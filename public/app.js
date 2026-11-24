@@ -4939,10 +4939,10 @@ async function openTunePopover(id, anchor) {
   const models = S.models.length ? S.models : [{ id: 'deepseek-flash', label: 'DeepSeek V4.1 Flash' }];
   const modelOpts = [{ id: 'auto', label: '自动（按内容路由）' }, ...models]
     .map(m => `<option value="${esc(m.id)}"${(c.model || '') === m.id ? ' selected' : ''}>${esc(m.label || m.id)}</option>`).join('');
-  const budgets = [4000, 8000, 24000, 48000, 128000, 256000, 512000, 1000000];
-  const curBudget = Number(ctx.budget) || 0;
-  const budgetOpts = [`<option value="0"${!curBudget ? ' selected' : ''}>跟随全局</option>`]
-    .concat(budgets.map(b => `<option value="${b}"${curBudget === b ? ' selected' : ''}>${b >= 1000000 ? '1M' : Math.round(b / 1000) + 'k'}</option>`)).join('');
+  // 服务端认的是 ctxBudget / ctxTopK / ctxHalfLifeDays，别用短名（会被 normalizeCtxOverrides 静默丢掉）
+  const curBudget = Number(ctx.ctxBudget) || 0;
+  const curTopK = ctx.ctxTopK ?? '';
+  const curHalf = ctx.ctxHalfLifeDays ?? '';
   const pop = document.createElement('div');
   pop.className = 'tune-pop';
   pop.innerHTML = `
@@ -4951,10 +4951,14 @@ async function openTunePopover(id, anchor) {
     <label>标题</label><input id="tuneTitle" value="${esc(c.title || '')}" maxlength="60">
     <label>模型</label><select id="tuneModel">${modelOpts}</select>
     <div class="row2">
-      <div><label>上下文预算</label><select id="tuneBudget">${budgetOpts}</select></div>
-      <div><label>召回条数</label><input id="tuneTopK" type="number" min="0" max="20" value="${ctx.topK ?? ''}" placeholder="跟随全局"></div>
+      <div><label>上下文预算</label>
+        <input id="tuneBudget" type="number" min="4000" max="1000000" step="1000" spellcheck="false"
+               value="${curBudget || ''}" placeholder="跟随全局">
+      </div>
+      <div><label>召回条数</label><input id="tuneTopK" type="number" min="0" max="20" value="${curTopK}" placeholder="跟随全局"></div>
     </div>
-    <label>半衰期（天，空 = 跟随全局）</label><input id="tuneHalf" type="number" min="0.5" max="3650" step="0.5" value="${ctx.halfLifeDays ?? ''}">
+    <div class="desc" style="font-size:11.5px;color:var(--text-2);margin-top:-4px">常用预算：24k / 64k / 128k / 256k / 512k / 1M；留空 = 跟随全局</div>
+    <label>半衰期（天，空 = 跟随全局）</label><input id="tuneHalf" type="number" min="0.5" max="3650" step="0.5" value="${curHalf}">
     <div class="foot">
       <button class="btn" data-tune-act="cancel">取消</button>
       <button class="btn primary" data-tune-act="save">保存</button>
@@ -4977,26 +4981,26 @@ async function openTunePopover(id, anchor) {
     if (!b) return;
     if (b.dataset.tuneAct === 'cancel') { close(); return; }
     try {
-      const budget = Number(pop.querySelector('#tuneBudget').value) || 0;
-      const topK = pop.querySelector('#tuneTopK').value.trim();
-      const half = pop.querySelector('#tuneHalf').value.trim();
+      const rawBudget = pop.querySelector('#tuneBudget').value.trim();
+      const rawTopK = pop.querySelector('#tuneTopK').value.trim();
+      const rawHalf = pop.querySelector('#tuneHalf').value.trim();
       const ctxPatch = {};
-      if (budget) ctxPatch.budget = budget;
-      if (topK !== '') ctxPatch.topK = Number(topK);
-      if (half !== '') ctxPatch.halfLifeDays = Number(half);
+      if (rawBudget !== '') ctxPatch.ctxBudget = Math.min(1000000, Math.max(4000, Math.round(Number(rawBudget)) || 0));
+      if (rawTopK !== '') ctxPatch.ctxTopK = Math.min(20, Math.max(0, Math.round(Number(rawTopK)) || 0));
+      if (rawHalf !== '') ctxPatch.ctxHalfLifeDays = Math.min(3650, Math.max(0.5, Number(rawHalf) || 0.5));
       const body = { model: pop.querySelector('#tuneModel').value, title: pop.querySelector('#tuneTitle').value.trim() || '新对话' };
-      if (Object.keys(ctxPatch).length) body.ctx = ctxPatch;
-      else if (ctx.followGlobal) body.ctx = {};
+      // 三项全留空 = 回到跟随全局（服务端收到 {} 会把手工覆盖整条删掉）
+      body.ctx = ctxPatch;
       await api('/api/conversations/' + id, { method: 'PATCH', body });
       await refreshState();
-      renderConversations();
+      renderSidebar();
       if (S.conv && S.conv.id === id) {
         S.conv = (await api('/api/conversations/' + id)).conversation;
         renderMessages();
         updateTopbar();
         refreshCtxBadge();
       }
-      toast('改好了');
+      toast(Object.keys(ctxPatch).length ? `改好了：预算 ${Math.round((ctxPatch.ctxBudget || 0) / 1000)}k` : '改好了：上下文回到跟随全局');
       close();
     } catch (err) {
       toast('改失败：' + err.message);
