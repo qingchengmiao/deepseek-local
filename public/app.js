@@ -3866,6 +3866,80 @@ async function openQqPage() {
         } finally { x.disabled = false; }
         return;
       }
+      if (act === 'napLoginRefresh') {
+        x.disabled = true;
+        const box = body.querySelector('#napLoginBox');
+        if (box) box.textContent = '正在读…';
+        try {
+          const r = await api('/api/napcat/login', { method: 'GET' }).catch(e => ({ ok: false, error: String(e.message || e) }));
+          const info = body.querySelector('#napLoginInfo');
+          if (info) {
+            if (r.ok === false) {
+              info.innerHTML = `读不到登录状态：${esc(r.error || '未知原因')}`;
+            } else {
+              const quick = r.quick || [];
+              const cur = (r.info && (r.info.uin || r.info.user_id)) || '';
+              const bits = [`WebUI ${esc(String(r.webuiPort || 6209))}`];
+              bits.push(cur ? `当前登录 <b>${esc(String(cur))}</b>` : '现在没登录');
+              bits.push(quick.length ? `可直接快速登录：${quick.map(u => esc(String(u))).join('、')}` : '本机没有快速登录凭据');
+              if (r.saved && r.saved.uin) bits.push(`存了 <b>${esc(String(r.saved.uin))}</b> 的密码 MD5（${esc(String(r.saved.at || ''))}）`);
+              info.innerHTML = bits.join(' · ');
+              const uinBox = body.querySelector('#napLoginUin');
+              if (uinBox && !uinBox.value) uinBox.value = String(cur || quick[0] || '');
+            }
+          }
+          if (box) box.textContent = r.ok === false ? '读失败：' + (r.error || '') : '读到了';
+        } finally { x.disabled = false; }
+        return;
+      }
+      if (act === 'napLoginQuick') {
+        x.disabled = true;
+        const box = body.querySelector('#napLoginBox');
+        const uin = (body.querySelector('#napLoginUin').value || '').trim();
+        if (box) box.textContent = '正在让它快速登录…（最多等 15 秒）';
+        try {
+          const r = await api('/api/napcat/login/quick', { method: 'POST', body: { uin } }).catch(e => ({ ok: false, error: String(e.message || e) }));
+          if (box) box.textContent = r.ok === false ? '没登上：' + (r.error || '未知原因') : `上来了（${esc(String(r.uin || uin))}）`;
+          toast(r.ok === false ? '快速登录没成：' + (r.error || '') : '快速登录成功', 4200);
+          await readNapHost();
+        } finally { x.disabled = false; }
+        return;
+      }
+      if (act === 'napLoginPassword') {
+        x.disabled = true;
+        const box = body.querySelector('#napLoginBox');
+        const uin = (body.querySelector('#napLoginUin').value || '').trim();
+        const pwd = body.querySelector('#napLoginPwd').value;
+        const remember = body.querySelector('#napLoginRemember').value === '1';
+        if (!uin || !pwd) { if (box) box.textContent = 'QQ 号和密码都要填'; x.disabled = false; return; }
+        if (box) box.textContent = '正在用账号密码登录…（最多等 25 秒）';
+        try {
+          const r = await api('/api/napcat/login/password', { method: 'POST', body: { uin, password: pwd, remember } }).catch(e => ({ ok: false, error: String(e.message || e) }));
+          if (r.ok) {
+            body.querySelector('#napLoginPwd').value = '';
+            if (box) box.textContent = `登上了（${esc(String(r.uin || uin))}）${remember ? '，已记住（只存 MD5）' : ''}`;
+            toast('账号密码登录成功', 3600);
+            await readNapHost();
+          } else if (r.needCaptcha) {
+            if (box) box.innerHTML = `要过滑块验证：<a href="${esc(r.proofWaterUrl || '')}" target="_blank" rel="noopener">去验证</a>，过完再点一次登录`;
+            toast('要过滑块验证，按提示去验证一下', 4600);
+          } else if (r.needNewDevice) {
+            if (box) box.innerHTML = `新设备验证没过：<a href="${esc(r.jumpUrl || '')}" target="_blank" rel="noopener">去验证</a>，过完再点一次登录`;
+            toast('要过新设备验证，按提示去验证一下', 4600);
+          } else {
+            if (box) box.textContent = '没登上：' + (r.error || '未知原因');
+            toast('账号密码登录失败：' + (r.error || ''), 4200);
+          }
+        } finally { x.disabled = false; }
+        return;
+      }
+      if (act === 'napLoginForget') {
+        const r = await api('/api/napcat/login/forget', { method: 'POST', body: {} }).catch(e => ({ ok: false, error: String(e.message || e) }));
+        const box = body.querySelector('#napLoginBox');
+        if (box) box.textContent = r.ok ? '存的密码 MD5 已经删了，被踢后不会再自动试账密' : '删失败：' + (r.error || '');
+        toast(r.ok ? '忘掉了' : '没删掉', 3000);
+        return;
+      }
       if (act === 'pushSave') {
         const enabled = body.querySelector('#pushEnabled').value === '1';
         const uid = body.querySelector('#pushUid').value.trim();
@@ -4801,6 +4875,23 @@ function qqPageHtml() {
         <button class="btn ghost" data-x="napHealNow" title="立刻跑一轮自检：缺 OneBot 配置就补、登录态坏了就重置并提示重扫">自动纠错</button>
       </div>
       <div class="tip" id="napHealBox" style="margin-top:8px">自动纠错：每 90 秒一轮，也可以在按钮上手动跑。</div>
+      <h4 style="margin-top:18px">登录（快速登录 / 账号密码）</h4>
+      <p class="tip" style="margin:2px 0 10px">密码只在这一步换成 MD5 发给本机 NapCat（WebUI 6209），落盘也只存 MD5、不存明文。被踢下线后会自动先试快速登录、再试存下来的密码，都不成才要你扫码。</p>
+      <div id="napLoginInfo" class="tip">还没读登录状态，点一下「刷新可登录账号」。</div>
+      <div class="qq-form" style="margin-top:8px">
+        <div class="field" style="grid-column:1/-1"><label>QQ 号</label><input id="napLoginUin" placeholder="3810187208"></div>
+        <div class="field"><label>密码</label><input id="napLoginPwd" type="password" placeholder="填了才能用账密登录"></div>
+        <div class="field"><label>记住密码（只存 MD5）</label>
+          <select id="napLoginRemember"><option value="1">记住，被踢后自动登</option><option value="0">不记</option></select>
+        </div>
+      </div>
+      <div class="cal-form-foot" style="margin-top:10px">
+        <button class="btn primary" data-x="napLoginPassword" title="用 QQ 号 + 密码登录；要过滑块 / 新设备验证时，这里会把该去哪验证告诉你">账号密码登录</button>
+        <button class="btn ghost" data-x="napLoginQuick" title="用本机已存的登录凭证快速登录（不用扫码）">快速登录</button>
+        <button class="btn ghost" data-x="napLoginRefresh">刷新可登录账号</button>
+        <button class="btn ghost" data-x="napLoginForget">忘掉存的密码</button>
+      </div>
+      <div class="tip" id="napLoginBox" style="margin-top:8px">还没试过。</div>
     </div>
     <div id="pushCard" class="card-block" style="margin-top:16px">
       <h4>消息推送</h4>

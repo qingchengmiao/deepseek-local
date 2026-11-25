@@ -1925,7 +1925,7 @@ const healState = { at: 0, rounds: 0, actions: [], needLogin: false, lastError: 
 // 掉线计时：QQ 进程还在、但 OneBot 端口不通 —— 宿主 supervisor 对这种状态只等不救。
 // 2026-11-25 的教训：日志里 KickedOffLine = 服务端把登录态作废了，重启进程只会起来停在「等扫码」，
 // 救不回来还加重风控。所以被踢就只提醒人扫码；只有「没被踢、像网络断」才重启一次试试。
-const healDown = { since: 0, restarts: 0, lastRestart: 0, lastNote: 0, why: '' };
+const healDown = { since: 0, restarts: 0, lastRestart: 0, lastNote: 0, loginTried: false, why: '' };
 
 function healLog(line) {
   const s = `[${new Date().toLocaleString('zh-CN', { hour12: false })}] ${line}`;
@@ -2013,6 +2013,126 @@ function napcatUins(shell) {
 }
 
 /** 差一 OneBot 配置就补；返回补过的 uin 列表 */
+
+// ---------------- NapCat WebUI 登录通道（不走 OneBot） ----------------
+// 认证口径（2026-11-25 实测）：POST /api/auth/login 的 body 是 { hash: sha256(token + '.napcat') }，
+// 回 { code:0, data:{ Credential } }，之后请求带 Authorization: Bearer <Credential>。
+// webui.json 里的 port 不一定可信（本机写 6099、实际听 6209），端口一律用设置里的 napcatWebuiPort。
+let webuiCred = { token: '', cred: '', at: 0 };
+
+function napcatWebuiFile(settings) {
+  const shell = String((settings && settings.napcatShell) || '').trim();
+  return shell ? path.join(shell, 'config', 'webui.json') : '';
+}
+
+function napcatWebuiToken(settings) {
+  const f = napcatWebuiFile(settings);
+  if (!f) return '';
+  try { return String(JSON.parse(fs.readFileSync(f, 'utf8')).token || ''); } catch { return ''; }
+}
+
+function webuiPost(port, pathname, body, cred) {
+  return new Promise((resolve, reject) => {
+    const payload = Buffer.from(JSON.stringify(body || {}), 'utf8');
+    const headers = { 'content-type': 'application/json', 'content-length': payload.length };
+    if (cred) headers.authorization = 'Bearer ' + cred;
+    const req = http.request({ host: '127.0.0.1', port, path: pathname, method: 'POST', headers, timeout: 15000 }, res => {
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8');
+        try { resolve(JSON.parse(text)); } catch { resolve({ code: -1, message: text.slice(0, 200) }); }
+      });
+    });
+    req.on('error', reject);
+    req.on('timeout', () => req.destroy(new Error('WebUI 请求超时（' + pathname + '）')));
+    req.end(payload);
+  });
+}
+
+async function napcatWebuiCred(settings, force = false) {
+  const token = napcatWebuiToken(settings);
+  if (!token) throw new Error('读不到 WebUI token（' + (napcatWebuiFile(settings) || '没配 napcatShell') + '）');
+  if (!force && webuiCred.token === token && webuiCred.cred && Date.now() - webuiCred.at < 30 * 60e3) return webuiCred.cred;
+  const port = Number(settings.napcatWebuiPort) || 6209;
+  const hash = crypto.createHash('sha256').update(token + '.napcat').digest('hex');
+  const r = await webuiPost(port, '/api/auth/login', { hash }, '');
+  if (!r || r.code !== 0 || !r.data || !r.data.Credential) throw new Error('WebUI 登录失败：' + ((r && r.message) || '没有 Credential'));
+  webuiCred = { token, cred: r.data.Credential, at: Date.now() };
+  return webuiCred.cred;
+}
+
+async function napcatWebuiCall(settings, name, body = {}) {
+  const port = Number(settings.napcatWebuiPort) || 6209;
+  let cred = await napcatWebuiCred(settings);
+  let r = await webuiPost(port, '/api/QQLogin/' + name, body, cred);
+  if (r && r.code === -1 && /Unauthorized|token/i.test(String(r.message || ''))) {
+    cred = await napcatWebuiCred(settings, true);
+    r = await webuiPost(port, '/api/QQLogin/' + name, body, cred);
+  }
+  return r;
+}
+
+// 密码登录只存 MD5（NapCat 的口径就是 MD5），不落明文；文件在 data\napcat-login.json
+const NAPCAT_LOGIN_FILE = path.join(DATA, 'napcat-login.json');
+
+function napcatSavedLogin() {
+  try {
+    const o = JSON.parse(fs.readFileSync(NAPCAT_LOGIN_FILE, 'utf8')) || {};
+    return o.uin && o.passwordMd5 ? o : null;
+  } catch { return null; }
+}
+
+function napcatSaveLogin(uin, passwordMd5) {
+  try {
+    fs.mkdirSync(DATA, { recursive: true });
+    fs.writeFileSync(NAPCAT_LOGIN_FILE, JSON.stringify({ uin: String(uin), passwordMd5, at: new Date().toISOString() }, null, 2), 'utf8');
+    return true;
+  } catch { return false; }
+}
+
+function napcatForgetLogin() {
+  try { fs.unlinkSync(NAPCAT_LOGIN_FILE); return true; } catch { return false; }
+}
+
+/** 等 QQ 真的登上去（SetQuickLogin / PasswordLogin 只是「请求已发送」，要再看状态） */
+async function napcatWaitLogin(settings, ms = 20000) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    await new Promise(r => setTimeout(r, 1500));
+    try {
+      const r = await napcatWebuiCall(settings, 'CheckLoginStatus');
+      if (r && r.code === 0 && r.data && r.data.isLogin) return true;
+    } catch { /* WebUI 可能正在重启，接着等 */ }
+  }
+  return false;
+}
+
+/**
+ * 被踢之后自动登录一次：先快速登录（本地有凭据），不行再账号密码（存过 MD5）。
+ * 两条都失败就返回原因，交给上层弹通知要人扫码 —— 不反复重试，免得招风控。
+ */
+async function napcatAutoLogin(settings) {
+  const saved = napcatSavedLogin();
+  const uin = saved ? String(saved.uin) : (napcatUins(settings.napcatShell)[0] || '');
+  if (!uin) return { ok: false, error: '没有可用账号（既不记得密码，也没有登录过的号）' };
+  try {
+    const r = await napcatWebuiCall(settings, 'SetQuickLogin', { uin });
+    // 「QQ Is Logined」不是失败：说明还有一条登录态在，确认一下就算成功。
+    const already = r && r.code !== 0 && /is\s*logined|already/i.test(String(r.message || ''));
+    if (r && (r.code === 0 || already) && await napcatWaitLogin(settings, 15000)) return { ok: true, how: '快速登录', uin };
+  } catch { /* 快速登录不可用就往下走 */ }
+  if (saved && saved.passwordMd5) {
+    try {
+      const r = await napcatWebuiCall(settings, 'PasswordLogin', { uin: saved.uin, passwordMd5: saved.passwordMd5 });
+      if (r && r.code === 0 && await napcatWaitLogin(settings, 25000)) return { ok: true, how: '账号密码登录', uin: saved.uin };
+      const d = (r && r.data) || {};
+      return { ok: false, uin, error: d.needCaptcha ? '要过滑块验证码' : (d.needNewDevice ? '新设备验证没过' : ((r && r.message) || '密码登录被拒')) };
+    } catch (e) { return { ok: false, uin, error: e.message }; }
+  }
+  return { ok: false, uin, error: '快速登录没成功，也没存密码' };
+}
+
 function ensureOnebotConfigs(settings) {
   const shell = String(settings.napcatShell || '').trim();
   if (!shell) return [];
@@ -2110,6 +2230,19 @@ async function napcatHealOnce({ force = false } = {}) {
         const a = `掉线 ${Math.round(down / 1000)} 秒（像是网络断、不是被踢），已重启一次试试${healDown.why ? '｜' + healDown.why : ''}`;
         actions.push(a); healLog(a);
       } else if ((kicked || healDown.restarts >= 1) && down >= (kicked ? 20e3 : 150e3)) {
+        // 被踢之后先自己登一次：快速登录（本地有凭据）→ 存过的账密（MD5）。都不成才叫人扫码。
+        if (kicked && !healDown.loginTried) {
+          healDown.loginTried = true;
+          const a = await napcatAutoLogin(settings).catch(e => ({ ok: false, error: e.message }));
+          if (a.ok) {
+            healDown.since = 0; healDown.restarts = 0; healDown.why = ''; healDown.loginTried = false;
+            healState.needLogin = false;
+            const msg = `被踢下线，已用${a.how}自动登回去（${a.uin}）`;
+            actions.push(msg); healLog(msg);
+            return { ok: true, actions, state: { ...healState, status: { running: st.running, loggedIn: st.loggedIn, fails: st.fails, phase: st.phase } } };
+          }
+          healLog(`被踢下线，自动登录没成${a.error ? '：' + a.error : ''}`);
+        }
         healState.needLogin = true;
         // 30 分钟才提醒一次，别把人烦死；提醒在本地弹窗，因为 QQ 通道这时候自己就是断的
         if (Date.now() - healDown.lastNote > 30 * 60e3) {
@@ -2328,7 +2461,8 @@ function startQQBridge() {
         // both = 收 + 回；send = 只收不自动回（但也要收，不然界面上看不到）
         if (cfg.mode === 'both' || cfg.mode === 'send') {
           const r = await qqPollOnce();
-          if (r && r.skipped) qqState.lastError = '';
+          // 这一轮没抛就说明上一次的错过去了，别让「fetch failed」永远挂在界面上。
+          if (!(r && r.error)) qqState.lastError = '';
         }
       }
     } catch (e) {
@@ -6012,6 +6146,78 @@ async function handleApi(req, res, url) {
     } catch (e) {
       return sendJson(res, 400, { ok: false, error: e.message });
     }
+  }
+
+  // 登录：WebUI 通道（快速登录 / 账号密码登录）。密码只算 MD5，不落明文
+  if (pathname === '/api/napcat/login' && method === 'GET') {
+    const settings = await loadSettings();
+    const saved = napcatSavedLogin();
+    let quick = [], info = null, err = '';
+    try {
+      const r = await napcatWebuiCall(settings, 'GetQuickLoginList');
+      if (r.code === 0) quick = Array.isArray(r.data) ? r.data : [];
+      else err = r.message || '取快速登录列表失败';
+    } catch (e) { err = e.message; }
+    try {
+      const r = await napcatWebuiCall(settings, 'GetQQLoginInfo');
+      if (r.code === 0) info = r.data;
+    } catch { /* 没登录时拿不到，正常 */ }
+    return sendJson(res, 200, {
+      ok: !err,
+      error: err,
+      webuiPort: Number(settings.napcatWebuiPort) || 6209,
+      quick,
+      info: info || null,
+      saved: saved ? { uin: saved.uin, at: saved.at || '' } : null,
+    });
+  }
+
+  if (pathname === '/api/napcat/login/quick' && method === 'POST') {
+    const body = await readBody(req) || {};
+    const uin = String(body.uin || '').trim();
+    if (!/^\d{5,12}$/.test(uin)) return sendJson(res, 400, { ok: false, error: 'QQ 号不对' });
+    try {
+      const settings = await loadSettings();
+      const r = await napcatWebuiCall(settings, 'SetQuickLogin', { uin });
+      // 已经登着的时候 NapCat 会回「QQ Is Logined」，那不是失败。
+      if (!r || (r.code !== 0 && !/is\s*logined|already/i.test(String(r.message || '')))) {
+        return sendJson(res, 400, { ok: false, error: (r && r.message) || '快速登录失败' });
+      }
+      const ok = await napcatWaitLogin(settings, 15000);
+      return sendJson(res, ok ? 200 : 400, { ok, uin, error: ok ? '' : '请求发出去了，但它没登上来（多半是凭据过期，要扫码）' });
+    } catch (e) { return sendJson(res, 400, { ok: false, error: e.message }); }
+  }
+
+  if (pathname === '/api/napcat/login/password' && method === 'POST') {
+    const body = await readBody(req) || {};
+    const uin = String(body.uin || '').trim();
+    const pwd = String(body.password || '');
+    const remember = !!body.remember;
+    if (!/^\d{5,12}$/.test(uin)) return sendJson(res, 400, { ok: false, error: 'QQ 号不对' });
+    if (!pwd) return sendJson(res, 400, { ok: false, error: '密码是空的' });
+    const md5 = crypto.createHash('md5').update(pwd, 'utf8').digest('hex');
+    try {
+      const settings = await loadSettings();
+      const r = await napcatWebuiCall(settings, 'PasswordLogin', { uin, passwordMd5: md5 });
+      const d = (r && r.data) || {};
+      if (!r || r.code !== 0) {
+        return sendJson(res, 400, {
+          ok: false,
+          needCaptcha: !!d.needCaptcha,
+          proofWaterUrl: d.proofWaterUrl || '',
+          needNewDevice: !!d.needNewDevice,
+          jumpUrl: d.jumpUrl || '',
+          error: (r && r.message) || '密码登录被拒',
+        });
+      }
+      const ok = await napcatWaitLogin(settings, 25000);
+      if (ok && remember) napcatSaveLogin(uin, md5);
+      return sendJson(res, ok ? 200 : 400, { ok, uin, saved: ok && remember, error: ok ? '' : '登录请求发出去了，但没等到登录成功' });
+    } catch (e) { return sendJson(res, 400, { ok: false, error: e.message }); }
+  }
+
+  if (pathname === '/api/napcat/login/forget' && method === 'POST') {
+    return sendJson(res, 200, { ok: napcatForgetLogin() });
   }
 
   // 推送：允许应用主动往 QQ 推一条（权限门 pushEnabled）
