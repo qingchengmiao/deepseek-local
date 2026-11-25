@@ -3010,6 +3010,13 @@ const ARCHIVE_DIR = path.join(DATA, 'archive');
 
 const MODEL_DIR = path.join(DATA, 'models');
 
+// 打包版里 data 目录在应用目录之外，path.relative 会算出「..\..\data\models」这种没法读的东西；
+// 带 .. 就直接给绝对路径，界面上一眼能照着放文件。
+function modelDirLabel() {
+  const rel = path.relative(ROOT, MODEL_DIR);
+  return rel && !rel.startsWith('..') ? rel : MODEL_DIR;
+}
+
 // 延迟加载：打包版可能没带 node_modules（或用户用的是精简包），
 // 那时 import 会失败，这里返回 null，上层照原设计降级到 API。
 let localLlmCache;
@@ -4378,7 +4385,7 @@ async function contextStatus(conv, settings) {
     summarizer: {
       mode: settings.ctxSummarizer || 'auto',
       engine: plan.engine,
-      localDir: path.relative(ROOT, MODEL_DIR),
+      localDir: modelDirLabel(),
       localModel: plan.localModel || '',
       model: (conv.memory && conv.memory.model) || '',
       alive: Array.isArray(localNames) && localNames.length > 0,
@@ -6378,7 +6385,7 @@ stopQQBridge();
     const models = (list || []).map(m => ({ name: m.name, size: m.bytes || 0, embed: isEmbedName(m.name) }));
     return sendJson(res, 200, {
       alive: Array.isArray(list),
-      dir: path.relative(ROOT, MODEL_DIR),
+      dir: modelDirLabel(),
       backend: llm ? (await llm.status().catch(() => ({})))?.kind || '' : '',
       models,
       chat: models.filter(m => !m.embed).map(m => m.name),
