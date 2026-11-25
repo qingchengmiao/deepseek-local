@@ -36,6 +36,17 @@ t('外链 target', '[a](https://e.com)', [['blank', out => out.includes('target=
 t('HTML 转义（防注入）', '<script>alert(1)</script> & <b>x</b>', [['无 script 标签', out => !out.includes('<script')], ['转义', out => out.includes('&lt;script&gt;')]]);
 t('水平线', 'a\n\n---\n\nb', [['hr', has('<hr')]]);
 
+console.log('1b) 纯文本链接（不说「看这里」也要能点开）');
+t('中文全角冒号后面', '链接：https://github.com/qingchengmiao/deepseek-local', [['a', has('<a href="https://github.com/qingchengmiao/deepseek-local"')]]);
+t('中文后面直接跟', '地址是https://a.com/e', [['a', has('<a href="https://a.com/e"')]]);
+t('粗体里的链接', '**https://a.com/b**', [['strong 包 a', out => out.includes('<strong><a href="https://a.com/b"')], ['一个 a', has('<a href=', 1)]]);
+t('删除线里的链接', '~~https://a.com/t~~', [['del 包 a', out => out.includes('<del><a href="https://a.com/t"')]]);
+t('不把中文括号算进地址', '见（https://a.com/d）', [['href 干净', out => out.includes('href="https://a.com/d"')]]);
+t('不把中文逗号算进地址', 'https://a.com/f，然后呢', [['href 干净', out => out.includes('href="https://a.com/f"')]]);
+t('行内代码里的不转', '`https://a.com/g` 和 https://a.com/h', [['只有一个 a', has('<a href=', 1)], ['指的 h', out => out.includes('href="https://a.com/h"')]]);
+t('www. 自动补协议', 'www.example.com/a', [['补 https', out => out.includes('href="https://www.example.com/a"')], ['字面还是 www', out => out.includes('>www.example.com/a</a>')]]);
+t('markdown 链接不重复包', '[文字](https://a.com/m)', [['一个 a', has('<a href=', 1)], ['href', out => out.includes('href="https://a.com/m"')], ['无残留占位符', out => !out.includes('\u0008')]]);
+
 console.log('2) 列表');
 t('无序/有序', '- 一\n- 二\n\n1. 甲\n2. 乙', [['ul', has('<ul>')], ['ol', has('<ol>')], ['li4', has('<li>', 4)]]);
 t('嵌套列表', '- 一\n  - 一.a\n  - 一.b\n- 二', [['嵌套 ul', has('<ul>', 2)]]);

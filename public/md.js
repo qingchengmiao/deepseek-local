@@ -78,14 +78,32 @@
       return `\u0002${codes.length - 1}\u0003`;
     });
 
-    // 图片、链接
+    // 图片、链接：先抽成占位符，下面自动识别裸链接时就不会把已生成好的 <a href> 再包一层
+    const links = [];
+    const stashLink = html => {
+      links.push(html);
+      return '\u0008' + (links.length - 1) + '\u0009';
+    };
     t = t.replace(/!\[([^\]]*)\]\((https?:[^)\s]+)\)/g, (_, alt, src) =>
-      `<img class="md-img" src="${src}" alt="${alt}" loading="lazy">`);
+      stashLink(`<img class="md-img" src="${src}" alt="${alt}" loading="lazy">`));
     t = t.replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, (_, label, href) =>
-      `<a href="${href}" target="_blank" rel="noopener">${label}</a>`);
-    // 裸链接（跳过已生成的 <a ...> 内部）
-    t = t.replace(/(^|[\s(（])(https?:\/\/[^\s<)）\]，。]+)/g, (m, pre, href) =>
-      `${pre}<a href="${href}" target="_blank" rel="noopener">${href}</a>`);
+      stashLink(`<a href="${href}" target="_blank" rel="noopener">${label}</a>`));
+
+    // 裸链接：不再要求前面是空白 ——「地址是https://…」这种中文直接跟链接、全角冒号后面、
+    // **粗体**里的链接都要认。只排掉 CJK 标点区和全角区，免得把「，」「）」算进地址。
+    t = t.replace(/(?:https?:\/\/|www\.)[^\s<>"'`\u3000-\u303f\uff00-\uffef]+/g, raw => {
+      // 尾部标点和 ** / ~~ 这类强调标记不算地址（* 一律切，_ 留着 —— URL 里 _ 很常见）
+      let url = raw.replace(/[.,;:!?*~]+$/, '').replace(/(?:&lt;|&gt;)+$/, '');
+      // 括号要配对：URL 里没有对应的左括号，末尾的右括号就不算地址
+      while (url.endsWith(')') && (url.match(/\(/g) || []).length < (url.match(/\)/g) || []).length) {
+        url = url.slice(0, -1);
+      }
+      if (!url) return raw;
+      const tail = raw.slice(url.length);
+      const href = /^www\./i.test(url) ? 'https://' + url : url;
+      if (href.length < 12) return raw;
+      return stashLink(`<a href="${href}" target="_blank" rel="noopener" title="${href}">${url}</a>`) + tail;
+    });
 
     t = t.replace(/\*\*\*([^*\n]+)\*\*\*/g, '<strong><em>$1</em></strong>');
     t = t.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
@@ -96,6 +114,7 @@
     t = t.replace(/\n/g, '<br>');
 
     t = t.replace(/\u0002(\d+)\u0003/g, (_, i) => codes[Number(i)] || '');
+    t = t.replace(/\u0008(\d+)\u0009/g, (_, i) => links[Number(i)] || '');
     return t;
   }
 
