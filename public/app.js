@@ -3905,6 +3905,24 @@ async function openQqPage() {
         } finally { x.disabled = false; }
         return;
       }
+      if (act === 'napLoginSave') {
+        // 只存密码（换 MD5），不尝试登录：在线时也能先把密码备好，被踢了才有得用
+        x.disabled = true;
+        const box = body.querySelector('#napLoginBox');
+        const uin = (body.querySelector('#napLoginUin').value || '').trim();
+        const pwd = body.querySelector('#napLoginPwd').value;
+        if (!uin || !pwd) { if (box) box.textContent = 'QQ 号和密码都要填'; x.disabled = false; return; }
+        if (box) box.textContent = '正在存密码（只存 MD5）…';
+        try {
+          const r = await api('/api/napcat/login/save', { method: 'POST', body: { uin, password: pwd } }).catch(e => ({ ok: false, error: String(e.message || e) }));
+          if (r.ok) {
+            body.querySelector('#napLoginPwd').value = '';
+            if (box) box.textContent = `存好了：${esc(uin)} 的密码 MD5（${esc(String((r.saved && r.saved.at) || ''))}）。被踢下线会自动用它试一次。`;
+            toast('密码存好了（只存 MD5）', 3600);
+          } else if (box) box.textContent = '没存上：' + (r.error || '未知原因');
+        } finally { x.disabled = false; }
+        return;
+      }
       if (act === 'napLoginPassword') {
         x.disabled = true;
         const box = body.querySelector('#napLoginBox');
@@ -4887,6 +4905,7 @@ function qqPageHtml() {
       </div>
       <div class="cal-form-foot" style="margin-top:10px">
         <button class="btn primary" data-x="napLoginPassword" title="用 QQ 号 + 密码登录；要过滑块 / 新设备验证时，这里会把该去哪验证告诉你">账号密码登录</button>
+        <button class="btn" data-x="napLoginSave" title="只把密码换成 MD5 存下来，不尝试登录——现在在线也能先备好，等被踢了才有得用">保存密码</button>
         <button class="btn ghost" data-x="napLoginQuick" title="用本机已存的登录凭证快速登录（不用扫码）">快速登录</button>
         <button class="btn ghost" data-x="napLoginRefresh">刷新可登录账号</button>
         <button class="btn ghost" data-x="napLoginForget">忘掉存的密码</button>

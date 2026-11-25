@@ -6200,6 +6200,12 @@ async function handleApi(req, res, url) {
       const settings = await loadSettings();
       const r = await napcatWebuiCall(settings, 'PasswordLogin', { uin, passwordMd5: md5 });
       const d = (r && r.data) || {};
+      // 现在就在线的时候 NapCat 会回「QQ Is Logined」——那不是失败。
+      // 这时候登不进去无所谓，但「记住密码」这件事得照做，否则真被踢了手里没有密码可用。
+      if (r && r.code !== 0 && /is\s*logined|already/i.test(String(r.message || ''))) {
+        if (remember) napcatSaveLogin(uin, md5);
+        return sendJson(res, 200, { ok: true, uin, already: true, saved: remember, error: '' });
+      }
       if (!r || r.code !== 0) {
         return sendJson(res, 400, {
           ok: false,
@@ -6213,6 +6219,22 @@ async function handleApi(req, res, url) {
       const ok = await napcatWaitLogin(settings, 25000);
       if (ok && remember) napcatSaveLogin(uin, md5);
       return sendJson(res, ok ? 200 : 400, { ok, uin, saved: ok && remember, error: ok ? '' : '登录请求发出去了，但没等到登录成功' });
+    } catch (e) { return sendJson(res, 400, { ok: false, error: e.message }); }
+  }
+
+  // 只存密码（换 MD5），不尝试登录：现在在线的时候也能先把密码备好，被踢了才有得用
+  if (pathname === '/api/napcat/login/save' && method === 'POST') {
+    const body = await readBody(req) || {};
+    const uin = String(body.uin || '').trim();
+    const pwd = String(body.password || '');
+    if (!/^\d{5,12}$/.test(uin)) return sendJson(res, 400, { ok: false, error: 'QQ 号不对' });
+    if (!pwd) return sendJson(res, 400, { ok: false, error: '密码是空的' });
+    const md5 = crypto.createHash('md5').update(pwd, 'utf8').digest('hex');
+    try {
+      napcatSaveLogin(uin, md5);
+      const s = napcatSavedLogin() || {};
+      // 只回「存了谁的、什么时候存的」，MD5 本身不回给前端
+      return sendJson(res, 200, { ok: true, uin, saved: { uin: s.uin || uin, at: s.at || '' } });
     } catch (e) { return sendJson(res, 400, { ok: false, error: e.message }); }
   }
 
