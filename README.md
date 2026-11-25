@@ -849,3 +849,29 @@ node tools/shot-bigconv.mjs "http://127.0.0.1:8787" "c_perfbig1"
 
 - 「三项全留空 → 保存」= 回跟随全局：服务端 `PATCH` 收到 `ctx: {}` 会 `delete conv.ctx`，手工覆盖整条撤掉。
 - 验证：`node tools/shot-tune-pop.mjs` —— CDP 起临时会话，点「调」→ 填 `200000` → 保存读 toast → 重开读回显 → 清空再保存 → 删临时会话。实测输出 `保存 200000: {"toast":"改好了：预算 200k","ctx":{"ctxBudget":200000}}`、`重开回显: {"budget":"200000"}`、`清空回全局: {"toast":"改好了：上下文回到跟随全局","ctx":null}`。截图 `data/shots/114-调这个会话-弹窗.png`。
+
+## 本地推理：进程内跑 gguf（2026-11-25 起）
+
+不开端口、不装服务，`local-llm.mjs` 直接在主进程里跑 llama.cpp（`node-llama-cpp`）。
+
+**必须先把 DLL 目录塞进 PATH，否则 CUDA 永远用不上。** 预编译的 `ggml-cuda.dll` 动态依赖 `cublas64_13.dll` / `cublasLt64_13.dll`（CUDA 13），而 Windows 解析 DLL 依赖时**不搜该 DLL 自己所在目录**，只搜系统目录 + PATH。找不到就静默不注册 CUDA 后端，库随后判「这个 CUDA 二进制和当前系统不兼容」，抛 `NoBinaryFoundError` —— 表现是 CUDA 机器上也跑 CPU。
+
+`prepareDllPath('cuda')` 干的就是这件事：把 `node_modules/@node-llama-cpp/win-x64-cuda/bins/win-x64-cuda` 和一份 cublas 13 的目录（优先 `data/local-llm/cuda`，其次 Ollama 自带的 `%LOCALAPPDATA%/Programs/Ollama/lib/ollama/cuda_v13`，再其次 CUDA Toolkit）一起插到 `PATH` 最前面。子进程（绑定测试）继承环境变量，所以探测也一起生效。
+
+实测（RTX 5070 / 驱动 13.5 / compute 12.0，qwen2.5-1.5b q4_k_m）：
+
+| 后端 | 加载 | 首答 | 热态 64 token |
+|---|---|---|---|
+| CPU | 84 ms | 1244 ms | 791 ms（81 tok/s） |
+| Vulkan | 527 ms | 5523 ms | 533 ms（120 tok/s） |
+| CUDA | 483 ms | 2921 ms | 109 ms（590 tok/s） |
+
+后端探测顺序 `cuda → vulkan → cpu`，每次都用 `getLlama({ build: 'never' })` —— **`build` 不能留默认**，否则没有匹配的预编译包时它会去 `git clone` llama.cpp 现场编译，要 CUDA toolkit + 几十分钟。
+
+自检：
+
+```powershell
+node tools\local-llm-test.mjs <model.gguf>   # 不给 gguf 就只做路径 + 探测
+```
+
+体积：5 个后端包合计约 690 MB（`win-x64-cuda` 184 MB + `cuda-ext` 390 MB + `vulkan` 72 MB + 纯 CPU 32 MB + arm64 11 MB），另有 cublas 13 约 504 MB —— 所以安装包里不能全塞，后端与 cublas 都得按需下载。
