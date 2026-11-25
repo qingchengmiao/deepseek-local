@@ -1922,12 +1922,39 @@ async function pushSend({ text, uid = '', group = '', kind = 'manual' } = {}) {
 //   3) 修完推一条 QQ 消息告诉人（如果那时候通道是通的）。
 // 不做的事：不去猜模型错误、不自动改 Key。
 const healState = { at: 0, rounds: 0, actions: [], needLogin: false, lastError: '', log: [] };
+// 掉线计时：QQ 进程还在、但 OneBot 端口不通 —— 宿主 supervisor 对这种状态只等不救，
+// 所以「登录被挤下线」之后能僵十几分钟到几小时。这里自己记账，按 45 秒 / 5 分 / 15 分各救一次。
+const healDown = { since: 0, restarts: 0, lastRestart: 0, why: '' };
 
 function healLog(line) {
   const s = `[${new Date().toLocaleString('zh-CN', { hour12: false })}] ${line}`;
   healState.log.push(s);
   if (healState.log.length > 40) healState.log.splice(0, healState.log.length - 40);
   fs.promises.appendFile(path.join(DATA, 'napcat-heal.log'), s + '\n').catch(() => {});
+}
+
+/**
+ * 从 NapCat 最新一份日志的尾部捞「为什么掉线」。
+ * KickedOffLine = 服务端把这一端踢了（同号在别处登录 / 风控），不是进程崩了。
+ * 只回一行摘要，读不到就回空串 —— 诊断用，不影响救活流程。
+ */
+function napcatDownReason(settings) {
+  try {
+    const dir = path.join(String(settings.napcatShell || '').trim(), 'logs');
+    const files = fs.readdirSync(dir).filter(f => f.endsWith('.log'))
+      .map(f => {
+        const p = path.join(dir, f);
+        return { p, t: fs.statSync(p).mtimeMs };
+      })
+      .sort((a, b) => b.t - a.t);
+    if (!files.length) return '';
+    const buf = fs.readFileSync(files[0].p, 'utf8').slice(-12000);
+    const hits = buf.match(/.*(KickedOffLine|登录已失效|账号状态变更为离线|正在重启 Worker).*/g);
+    if (!hits || !hits.length) return '';
+    const last = hits[hits.length - 1].trim();
+    // 去掉时间戳和级别前缀，留「[KickedOffLine] [下线通知] …」这段人看得懂的
+    return last.replace(/^\d\d-\d\d \d\d:\d\d:\d\d\s+\[[a-z]+\]\s*/, '').replace(/^.*?\|\s*/, '').slice(0, 160);
+  } catch { return ''; }
 }
 
 function onebotTemplate(httpPort, wsPort) {
@@ -2029,7 +2056,43 @@ async function napcatHealOnce({ force = false } = {}) {
       actions.push(a); healLog(a);
     }
     healState.needLogin = false;
+    healDown.since = 0;
+    healDown.restarts = 0;
+    healDown.why = '';
   } else {
+    const alive = (Number(st.processCount) || 0) > 0 || (Array.isArray(st.pids) && st.pids.length > 0);
+    if (alive && !st.httpUp) {
+      // 进程都还在、OneBot 却不通 —— 这就是「登录被挤下线」的样子。
+      // 宿主的 supervisor 在这种状态下只写 waiting-login 干等，永远不重启，所以这里补上救援。
+      if (!healDown.since) {
+        healDown.since = Date.now();
+        healDown.why = napcatDownReason(settings);
+        healLog(`掉线：OneBot 不通（${st.processCount || 0} 个进程还活着）${healDown.why ? '，日志说：' + healDown.why : ''}`);
+      }
+      const down = Date.now() - healDown.since;
+      // 45 秒 / 5 分钟 / 15 分钟各救一次；再不行就判定需要人工扫码，不再反复折腾
+      const plan = [45e3, 5 * 60e3, 15 * 60e3];
+      if (healDown.restarts >= plan.length) {
+        if (!healState.needLogin) {
+          healState.needLogin = true;
+          healDown.why ||= '连着三次重启都没回来，可能要重新扫码';
+          const a = `掉线 ${Math.round(down / 1000)} 秒，重启三次都没回来，要重新扫码${healDown.why ? '｜' + healDown.why : ''}`;
+          actions.push(a); healLog(a);
+        }
+      } else if (down >= plan[healDown.restarts] && Date.now() - healDown.lastRestart > 30e3) {
+        await napcatHostRun(settings, 'stop').catch(() => null);
+        await napcatHostRun(settings, 'start').catch(() => null);
+        healDown.restarts += 1;
+        healDown.lastRestart = Date.now();
+        const a = `掉线 ${Math.round(down / 1000)} 秒，已重启实例（第 ${healDown.restarts} 次）${healDown.why ? '｜' + healDown.why : ''}`;
+        actions.push(a); healLog(a);
+      }
+      healState.lastError = healDown.why || 'OneBot 不通（进程还在）';
+      if (!actions.length) {
+        // 这一轮还没到点，先不推消息，只在状态里标出来
+        return { ok: true, actions, state: { ...healState, status: { running: st.running, loggedIn: st.loggedIn, fails: st.fails, phase: st.phase, downSeconds: Math.round(down / 1000) } } };
+      }
+    }
     const fails = Number(st.fails) || 0;
     if (fails >= 2) {
       const fixed = ensureOnebotConfigs(settings);
