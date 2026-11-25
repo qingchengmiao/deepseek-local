@@ -735,9 +735,13 @@ const locks = new Map();
 function withLock(key, fn) {
   const prev = locks.get(key) || Promise.resolve();
   const next = prev.then(fn, fn);
-  locks.set(key, next.catch(() => {}));
+  // 注意：这里存进去的是 next.catch(...) 这个新 promise，不是 next。
+  // 所以清锁时必须比同一个对象，否则 locks 里那条记录永远删不掉，
+  // locks.has(`chat:${id}`) 会一直为真——后台压缩就每轮都「还有人在对话」静默跳过。
+  const guard = next.catch(() => {});
+  locks.set(key, guard);
   next.finally(() => {
-    if (locks.get(key) === next) locks.delete(key);
+    if (locks.get(key) === guard) locks.delete(key);
   });
   return next;
 }
@@ -831,7 +835,6 @@ async function saveSettings(patch) {
     else if (k === 'ctxRagMinScore') next.ctxRagMinScore = Math.max(0, Math.min(1, Number(v) || 0));
     else if (k === 'ctxSummarizer') next.ctxSummarizer = ['auto', 'local', 'api'].includes(v) ? v : 'auto';
     else if (k === 'readLinkMode') next.readLinkMode = ['auto', 'api', 'local'].includes(v) ? v : 'auto';
-    else if (k === 'ctxLocalUrl') next.ctxLocalUrl = String(v || '').trim() || CTX_DEFAULTS.ctxLocalUrl;
     else if (k === 'ctxLocalModel') next.ctxLocalModel = String(v || '').trim().slice(0, 120);
     else if (k === 'ctxEmbedModel') {
       const s = String(v || '').trim().slice(0, 120);
@@ -2105,15 +2108,12 @@ function stopLearnLoop() {
 async function channelsState() {
   const settings = await loadSettings();
   const [napcat, cal] = await Promise.all([napcatStatus(settings).catch(() => null), loadCalendar().catch(() => ({ events: [] }))]);
+  // 本机模型现在是进程内的，没有端口也没有服务可探：有 gguf 就算可用
   let local = { ok: false, models: 0, chat: settings.ctxLocalModel || '' };
   try {
-    const r = await fetch(settings.ctxLocalUrl + '/api/tags', { signal: AbortSignal.timeout(1200) });
-    if (r.ok) {
-      const d = await r.json();
-      const models = d.models || [];
-      local = { ok: true, models: models.length, chat: settings.ctxLocalModel || (await pickLocalChatModel(settings).catch(() => '')) || '' };
-    }
-  } catch { /* 没开 ollama 而已 */ }
+    const names = (await localModelNames()) || [];
+    local = { ok: names.length > 0, models: names.length, chat: settings.ctxLocalModel || (await pickLocalChatModel(settings)) || '' };
+  } catch { /* 推理环境没装起来就当作不可用 */ }
   return {
     qq: {
       mode: settings.qqMode, uid: settings.qqUid, group: settings.qqGroup,
@@ -2997,17 +2997,34 @@ function wantsReadLink(text) {
   return /https?:\/\//i.test(String(text || ''));
 }
 
-// ---------------------------------------------------------------- 本机小模型（ollama）
-// 压缩摘要优先交给本机 ollama 的小模型写：不走网络、不花 API 钱。
+// ---------------------------------------------------------------- 本机小模型（进程内 gguf）
+// 压缩摘要优先交给本机小模型写：不花 API 钱。
+// 2026-11-25 起**不再走 ollama**：以前是 HTTP 打到 127.0.0.1:11434，现在直接在这个进程里
+// 跑 gguf（local-llm.mjs + node-llama-cpp）。不开端口、不装服务、不用管 Ollama 起没起。
 // 它只是「写摘要」，挂了不影响聊天：降级到 DeepSeek API，再不行就丢掉老消息。
 
 const ARCHIVE_DIR = path.join(DATA, 'archive');
 
 // ---------------------------------------------------------------- 摘要模型自动拉取
-// 本机 ollama 里没有可用的小模型时，自动拉一个：先走 ollama 官方源，
-// 拉不动（国内网络常见）就换成国内镜像下 GGUF，再用 ollama create 装进去。
+// 没有 gguf 就从国内镜像下（ModelScope → hf-mirror），落到 data/models，用不着 ollama。
 
 const MODEL_DIR = path.join(DATA, 'models');
+
+// 延迟加载：打包版可能没带 node_modules（或用户用的是精简包），
+// 那时 import 会失败，这里返回 null，上层照原设计降级到 API。
+let localLlmCache;
+async function localLlm() {
+  if (localLlmCache !== undefined) return localLlmCache;
+  try {
+    const mod = await import('./local-llm.mjs');
+    mod.setRootDir(ROOT);
+    mod.setModelDir(MODEL_DIR);
+    localLlmCache = mod;
+  } catch {
+    localLlmCache = null;
+  }
+  return localLlmCache;
+}
 
 /** 候选摘要模型：从小到大，先试小的（省流量也够写摘要） */
 const PULL_TARGETS = [
@@ -3045,24 +3062,6 @@ const MIRROR_OVERRIDE = (() => {
 function pullMirrors() {
   if (MIRROR_OVERRIDE) return MIRROR_OVERRIDE.slice();
   return PULL_MIRRORS.map(m => ({ ...m, url: m.url }));
-}
-
-function findOllamaCli() {
-  if (process.env.DSAPP_OLLAMA_CLI) return process.env.DSAPP_OLLAMA_CLI;
-  const names = process.platform === 'win32' ? ['ollama.exe', 'ollama.cmd'] : ['ollama'];
-  const dirs = [
-    process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Programs', 'Ollama') : '',
-    process.env.ProgramFiles ? path.join(process.env.ProgramFiles, 'Ollama') : '',
-    process.env.ProgramW6432 ? path.join(process.env.ProgramW6432, 'Ollama') : '',
-    process.env.USERPROFILE ? path.join(process.env.USERPROFILE, 'AppData', 'Local', 'Programs', 'Ollama') : '',
-  ].filter(Boolean);
-  for (const dir of dirs) {
-    for (const name of names) {
-      const f = path.join(dir, name);
-      if (existsSync(f)) return f;
-    }
-  }
-  return 'ollama';
 }
 
 let modelPull = {
@@ -3110,7 +3109,7 @@ function runCli(exe, args, { timeoutMs = 180000, cwd } = {}) {
     let err = '';
     let child;
     try {
-      // 测试注入的假 ollama 是一个 .mjs 脚本，用 node 跑起来
+      // 测试注入的假可执行文件是一个 .mjs 脚本，用 node 跑起来
       if (/\.m?js$/i.test(exe)) child = spawn(process.execPath, [exe, ...args], { cwd, windowsHide: true, env: process.env });
       else child = spawn(exe, args, { cwd, windowsHide: true, env: process.env });
     } catch (e) {
@@ -3155,32 +3154,17 @@ async function downloadTo(url, dest) {
   return { bytes: got, total };
 }
 
-function modelfileFor(target, ggufPath) {
-  return [
-    `FROM ${ggufPath.replace(/\\/g, '/')}`,
-    'PARAMETER num_ctx 8192',
-    'PARAMETER temperature 0.3',
-    'TEMPLATE """{{ if .System }}<|im_start|>system',
-    '{{ .System }}<|im_end|>',
-    '{{ end }}{{ if .Prompt }}<|im_start|>user',
-    '{{ .Prompt }}<|im_end|>',
-    '{{ end }}<|im_start|>assistant',
-    '{{ .Response }}<|im_end|>',
-    '"""',
-    '',
-  ].join('\n');
-}
-
-/** 检查 ollama 里有没有可用的对话模型（摘要用） */
+/** 本机有没有可用的对话模型（摘要用） */
 async function hasChatModel(settings) {
-  const tags = await ollamaTags(settings);
-  if (!tags) return { alive: false, model: '' };
+  const llm = await localLlm();
+  if (!llm) return { alive: false, model: '' };
   const model = await pickLocalChatModel(settings);
-  return { alive: true, model: model && tags.some(n => n === model || n.startsWith(model)) ? model : model };
+  return { alive: !!model, model };
 }
 
 /**
- * 拉一个摘要模型：官方源 → 国内镜像（GGUF + ollama create）。
+ * 拉一个摘要模型：直接下 GGUF 到 data/models（ModelScope → hf-mirror）。
+ * 不碰 ollama：文件落地就能在进程里跑（local-llm.mjs 认的就是这个目录）。
  * 整个过程在后台跑，进度写进 modelPull，状态接口可查。
  */
 async function pullSummaryModel(settings, { reason = '' } = {}) {
@@ -3188,16 +3172,16 @@ async function pullSummaryModel(settings, { reason = '' } = {}) {
   modelPull = { running: true, ok: false, startedAt: Date.now(), finishedAt: 0, step: '', source: '', model: '', bytes: 0, total: 0, error: '', log: [] };
   pullLog(reason ? `开始：${reason}` : '开始拉摘要模型');
 
-  const tags = await ollamaTags(settings);
-  if (!tags) {
+  const llm = await localLlm();
+  if (!llm) {
     modelPull.running = false;
     modelPull.finishedAt = Date.now();
-    modelPull.error = '本机 ollama 没起来，拉不了模型';
+    modelPull.error = '本机推理没装起来（缺 node_modules/node-llama-cpp），下了模型也跑不了';
     pullLog(modelPull.error);
     return pullSnapshot();
   }
   const existing = await pickLocalChatModel(settings);
-  if (existing && tags.some(n => n === existing || n.startsWith(`${existing}:`) || existing.startsWith(n))) {
+  if (existing) {
     modelPull.running = false;
     modelPull.finishedAt = Date.now();
     modelPull.ok = true;
@@ -3207,48 +3191,23 @@ async function pullSummaryModel(settings, { reason = '' } = {}) {
     return pullSnapshot();
   }
 
-  const cli = findOllamaCli();
-  pullLog(`ollama 命令：${cli}`);
-
+  await fsp.mkdir(MODEL_DIR, { recursive: true });
   for (const target of PULL_TARGETS) {
-    // 1) 官方源
-    pullLog(`试官方源：ollama pull ${target.tag}`);
-    const pulled = await runCli(cli, ['pull', target.tag], { timeoutMs: 20 * 60 * 1000 });
-    if (pulled.ok) {
-      modelPull.ok = true;
-      modelPull.model = target.tag;
-      modelPull.source = 'ollama 官方源';
-      pullLog(`官方源拉好了：${target.tag}`);
-      break;
-    }
-    pullLog(`官方源没成（exit=${pulled.code}），换国内镜像`);
-
-    // 2) 国内镜像：下 GGUF → ollama create
-    const mirrors = pullMirrors();
-    for (const mirror of mirrors) {
+    const gguf = path.join(MODEL_DIR, target.file);
+    for (const mirror of pullMirrors()) {
       const url = typeof mirror.url === 'function' ? mirror.url(target) : String(mirror.url || '');
       if (!url) continue;
       const label = mirror.label || mirror.id || '镜像';
-      const gguf = path.join(MODEL_DIR, target.file);
-      const modelFile = path.join(MODEL_DIR, `${target.tag.replace(/[:\/]/g, '-')}.Modelfile`);
       try {
         modelPull.bytes = 0;
         modelPull.total = 0;
-        if (!existsSync(gguf)) {
-          pullLog(`从${label}下载 ${target.file}（${target.size}）`);
-          await downloadTo(url, gguf);
-        } else {
-          pullLog(`已经有现成的 GGUF：${target.file}`);
-        }
-        await fsp.mkdir(MODEL_DIR, { recursive: true });
-        await fsp.writeFile(modelFile, modelfileFor(target, gguf), 'utf8');
-        pullLog(`用 ollama create 装成 ${target.tag}`);
-        const created = await runCli(cli, ['create', target.tag, '-f', modelFile], { timeoutMs: 10 * 60 * 1000 });
-        if (!created.ok) throw new Error((created.err || created.out || `exit=${created.code}`).trim().slice(0, 200));
+        pullLog(`从${label}下载 ${target.file}（${target.size}）`);
+        await downloadTo(url, gguf);
+        if (!existsSync(gguf)) throw new Error('下完了却没看到文件');
         modelPull.ok = true;
-        modelPull.model = target.tag;
+        modelPull.model = target.file;
         modelPull.source = label;
-        pullLog(`装好了：${target.tag}（来源 ${label}）`);
+        pullLog(`下好了：${target.file}（来源 ${label}），本机推理直接能用了`);
         break;
       } catch (e) {
         pullLog(`${label}失败：${String(e.message || e).slice(0, 160)}`);
@@ -3257,7 +3216,7 @@ async function pullSummaryModel(settings, { reason = '' } = {}) {
     if (modelPull.ok) break;
   }
 
-  if (!modelPull.ok) modelPull.error = modelPull.error || '官方源和国内镜像都没拉成（检查网络或手动 ollama pull）';
+  if (!modelPull.ok) modelPull.error = modelPull.error || '国内镜像都没下成（检查网络，或手动把 gguf 放进 data/models）';
   modelPull.running = false;
   modelPull.finishedAt = Date.now();
   return pullSnapshot();
@@ -3275,111 +3234,54 @@ function startModelPull(settings, opts = {}) {
 }
 
 
-let ollamaAliveCache = { at: 0, alive: false };
-
-function ollamaBase(settings) {
-  return String(settings.ctxLocalUrl || CTX_DEFAULTS.ctxLocalUrl || 'http://127.0.0.1:11434').replace(/\/+$/, '');
-}
-
 function isEmbedName(name) {
   return /embed|bge|gte|minilm|rerank/i.test(String(name || ''));
 }
 
-/** 本地 ollama 有哪些模型；null = 服务没起来 */
-async function ollamaTags(settings) {
-  try {
-    const r = await fetch(`${ollamaBase(settings)}/api/tags`, { signal: AbortSignal.timeout(2500) });
-    if (!r.ok) return null;
-    const j = await r.json().catch(() => null);
-    const list = Array.isArray(j?.models) ? j.models.map(m => String(m.name || '')).filter(Boolean) : [];
-    ollamaAliveCache = { at: now(), alive: true };
-    return list;
-  } catch {
-    ollamaAliveCache = { at: now(), alive: false };
-    return null;
-  }
+/** 本机有哪些模型（gguf 文件名）；null = 推理环境没装起来 */
+async function localModelNames() {
+  const llm = await localLlm();
+  if (!llm) return null;
+  return llm.listModels().map((m) => m.name);
 }
 
-const SMALL_CHAT_HINTS = ['qwen2.5:1.5b', 'qwen2.5:0.5b', 'qwen3:1.7b', 'qwen3:0.6b', 'qwen3.5:4b', 'llama3.2:1b', 'gemma4:2b'];
-
-/** 挑一个写摘要的本地模型：设置里指定的优先，否则按「小」的顺序猜 */
+/** 挑一个写摘要的本机模型：设置里指定的优先，否则挑最小的那个（不是向量模型） */
 async function pickLocalChatModel(settings) {
+  const llm = await localLlm();
+  if (!llm) return '';
   const want = String(settings.ctxLocalModel || '').trim();
-  if (want) return want;
-  const names = await ollamaTags(settings);
-  if (!names || !names.length) return '';
-  const chat = names.filter(n => !isEmbedName(n));
-  for (const hint of SMALL_CHAT_HINTS) {
-    const hit = chat.find(n => n === hint || n.startsWith(hint) || n.startsWith(hint.split(':')[0] + ':'));
-    if (hit) return hit;
-  }
-  return chat[0] || '';
+  const hit = llm.resolveModelPath(want);
+  return hit ? path.basename(hit) : '';
 }
 
 /** 挑一个向量模型：off/空 = 关；auto = 找名字里带 embed 的 */
 async function pickEmbedModel(settings) {
+  const llm = await localLlm();
+  if (!llm) return '';
   const want = String(settings.ctxEmbedModel || '').trim();
   if (!want || want === 'off') return '';
-  if (want !== 'auto') return want;
-  const names = await ollamaTags(settings);
-  if (!names) return '';
-  return names.find(n => isEmbedName(n)) || '';
+  const hit = llm.resolveEmbedModelPath(want === 'auto' ? '' : want);
+  return hit ? path.basename(hit) : '';
 }
 
-async function ollamaChat(settings, { model, system, user, maxTokens = 700 }) {
+/** 进程内写摘要：没有 HTTP、没有端口、没有 ollama */
+async function localChat(settings, { model, system, user, maxTokens = 700 }) {
+  const llm = await localLlm();
+  if (!llm) throw new Error('本机推理没装起来（缺 node_modules/node-llama-cpp）');
   const m = model || (await pickLocalChatModel(settings));
-  if (!m) throw new Error('本机 ollama 里没有可用的对话模型');
-  const ask = async withThink => {
-    const r = await fetch(`${ollamaBase(settings)}/api/chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: m,
-        stream: false,
-        ...(withThink ? { think: false } : {}),
-        options: { temperature: 0.2, num_ctx: 16384, num_predict: maxTokens },
-        messages: [
-          { role: 'system', content: system },
-          { role: 'user', content: user },
-        ],
-      }),
-      signal: AbortSignal.timeout(300000),
-    });
-    return r;
-  };
-  // 带思考的模型（qwen3 系列等）会把正文塞进 thinking、content 留空，先要求它别思考
-  let r = await ask(true);
-  if (!r.ok && r.status === 400) r = await ask(false);
-  if (!r.ok) throw new Error(`本地模型 HTTP ${r.status}`);
-  const j = await r.json().catch(() => null);
-  let text = String(j?.message?.content || '').trim();
-  if (!text) {
-    // 实在关不掉思考：把思考内容当摘要（去掉明显的推理前缀）
-    text = String(j?.message?.thinking || '').trim();
-    if (text) text = text.replace(/^(思考|Thinking)[:：]?/i, '').trim();
-  }
-  if (!text) throw new Error('本地模型返回了空摘要');
-  return { text, model: m };
+  if (!m) throw new Error('本机 data/models 里没有可用的 gguf 对话模型');
+  const r = await llm.chat({ model: m, system, user, maxTokens, temperature: 0.2 });
+  return { text: r.text, model: r.model };
 }
 
-async function ollamaEmbed(settings, model, texts) {
-  const out = [];
-  const batch = 16;
-  for (let i = 0; i < texts.length; i += batch) {
-    const part = texts.slice(i, i + batch);
-    const r = await fetch(`${ollamaBase(settings)}/api/embed`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, input: part }),
-      signal: AbortSignal.timeout(300000),
-    });
-    if (!r.ok) throw new Error(`本地向量 HTTP ${r.status}`);
-    const j = await r.json().catch(() => null);
-    const vecs = Array.isArray(j?.embeddings) ? j.embeddings : [];
-    if (vecs.length !== part.length) throw new Error('本地向量返回数量不对');
-    out.push(...vecs);
-  }
-  return out;
+/** 进程内算向量；没有向量 gguf 时抛错，调用方退回词面检索 */
+async function localEmbed(settings, model, texts) {
+  const llm = await localLlm();
+  if (!llm) throw new Error('本机推理没装起来（缺 node_modules/node-llama-cpp）');
+  const m = model || (await pickEmbedModel(settings));
+  const vecs = await llm.embed({ model: m, texts });
+  if (!vecs) throw new Error('本机没有向量 gguf 模型');
+  return vecs;
 }
 
 // ---------------------------------------------------------------- 原文归档
@@ -3458,7 +3360,7 @@ async function archiveRange(conv, settings, slice, from, to, engine) {
   if (embedModel) {
     try {
       const probe = payload.messages.map(m => `${m.role === 'user' ? '我' : '助手'}：${m.content.slice(0, 1200)}`).join('\n').slice(0, 6000);
-      const [vec] = await ollamaEmbed(settings, embedModel, [probe]);
+      const [vec] = await localEmbed(settings, embedModel, [probe]);
       if (vec && vec.length) {
         entry.vec = vec.map(v => Math.round(v * 10000) / 10000);
         idx.embedModel = embedModel;
@@ -3494,7 +3396,7 @@ async function retrieveArchive(conv, settings, query, { topK = 4, minScore = 0.0
   let qvec = null;
   if (idx.embedModel && idx.dims) {
     try {
-      const [v] = await ollamaEmbed(settings, idx.embedModel, [String(query).slice(0, 2000)]);
+      const [v] = await localEmbed(settings, idx.embedModel, [String(query).slice(0, 2000)]);
       if (v && v.length === idx.dims) qvec = v;
     } catch {}
   }
@@ -3546,8 +3448,8 @@ async function archiveStats(convId) {
 async function summarizerPlan(settings) {
   const mode = ['auto', 'local', 'api'].includes(settings.ctxSummarizer) ? settings.ctxSummarizer : 'auto';
   const hasKey = !!String(settings.apiKey || '').trim();
-  const tags = mode === 'api' ? null : await ollamaTags(settings);
-  const localModel = tags ? await pickLocalChatModel(settings) : '';
+  const tags = mode === 'api' ? null : await localModelNames();
+  const localModel = tags && tags.length ? await pickLocalChatModel(settings) : '';
   const local = !!(tags && localModel);
   if (!local && tags && mode !== 'api' && settings.ctxAutoPull !== false) {
     startModelPull(settings, { reason: '压缩要用本机摘要模型' });
@@ -3556,14 +3458,14 @@ async function summarizerPlan(settings) {
   if (mode === 'local') {
     return {
       engine: local ? 'local' : 'none', localModel, local, hasKey, pulling,
-      reason: local ? '' : (pulling ? '正在从国内镜像拉本机小模型…' : '本机 ollama 没有可用模型'),
+      reason: local ? '' : (pulling ? '正在从国内镜像拉本机小模型…' : '本机 data/models 里没有 gguf 模型'),
     };
   }
   if (mode === 'api') return { engine: hasKey ? 'api' : 'none', localModel, local, hasKey, pulling: false, reason: hasKey ? '' : '没填 API Key' };
   if (local) return { engine: 'local', localModel, local, hasKey, pulling: false, reason: '' };
   return {
     engine: hasKey ? 'api' : 'none', localModel, local, hasKey, pulling,
-    reason: hasKey ? '' : (pulling ? '本机 ollama 没模型（正在拉），也没填 API Key' : '本机 ollama 没起来，也没填 API Key'),
+    reason: hasKey ? '' : (pulling ? '本机没有 gguf 模型（正在拉），也没填 API Key' : '本机没有 gguf 模型，也没填 API Key'),
   };
 }
 
@@ -3603,7 +3505,7 @@ async function compactMemory(conv, settings, history, upto, { force = false, lev
   const useLocal = plan.engine === 'local';
   if (useLocal) {
     try {
-      const r = await ollamaChat(settings, {
+      const r = await localChat(settings, {
         model: plan.localModel,
         system: MEMORY_SYSTEM,
         user: userPrompt,
@@ -3756,7 +3658,7 @@ async function consolidateMemory(conv, settings, history, { rawRatio = 0, forget
   const warnings = [];
   if (plan.engine === 'local') {
     try {
-      const r = await ollamaChat(settings, { model: plan.localModel, system: CONSOLIDATE_SYSTEM, user: userPrompt, maxTokens: 800 });
+      const r = await localChat(settings, { model: plan.localModel, system: CONSOLIDATE_SYSTEM, user: userPrompt, maxTokens: 800 });
       const bad = summaryLooksBad(r.text, userPrompt, { needSections: true });
       if (bad) {
         warnings.push(`本地模型写的不像概括（${bad}），改用 API`);
@@ -4435,6 +4337,7 @@ async function contextStatus(conv, settings) {
   const index = history.length ? getCachedIndex(conv, history) : buildIndex([]);
   const totalTokens = estimateMessagesTokens(history);
   const plan = await summarizerPlan(settings);
+  const localNames = await localModelNames().catch(() => null);
   const archive = await archiveStats(conv.id);
   return {
     budget,
@@ -4475,10 +4378,10 @@ async function contextStatus(conv, settings) {
     summarizer: {
       mode: settings.ctxSummarizer || 'auto',
       engine: plan.engine,
-      localUrl: settings.ctxLocalUrl || CTX_DEFAULTS.ctxLocalUrl,
+      localDir: path.relative(ROOT, MODEL_DIR),
       localModel: plan.localModel || '',
       model: (conv.memory && conv.memory.model) || '',
-      alive: ollamaAliveCache.alive,
+      alive: Array.isArray(localNames) && localNames.length > 0,
       reason: plan.reason || '',
       pulling: !!plan.pulling,
       autoPull: settings.ctxAutoPull !== false,
@@ -4490,7 +4393,6 @@ async function contextStatus(conv, settings) {
       ctxRag: settings.ctxRag,
       ctxArchive: settings.ctxArchive,
       ctxSummarizer: settings.ctxSummarizer,
-      ctxLocalUrl: settings.ctxLocalUrl,
       ctxLocalModel: settings.ctxLocalModel,
       ctxEmbedModel: settings.ctxEmbedModel,
       ctxTopK: settings.ctxTopK,
@@ -6440,7 +6342,7 @@ stopQQBridge();
     if (plan.engine === 'local') {
       const t0 = Date.now();
       try {
-        const r = await ollamaChat(settings, {
+        const r = await localChat(settings, {
           model: plan.localModel,
           system: '你是一个摘要器，只输出要点，不要寒暄。',
           user: '把这句话压缩成一条要点：用户希望回答尽量短，代码注释用中文。',
@@ -6470,19 +6372,14 @@ stopQQBridge();
 
   if (pathname === '/api/local-models' && method === 'GET') {
     const settings = await loadSettings();
-    const list = await ollamaTags(settings);
-    const sizes = new Map();
-    if (Array.isArray(list)) {
-      try {
-        const r = await fetch(`${ollamaBase(settings)}/api/tags`, { signal: AbortSignal.timeout(2500) });
-        const j = r.ok ? await r.json() : null;
-        for (const m of (j?.models || [])) sizes.set(String(m.name || ''), Number(m.size) || 0);
-      } catch {}
-    }
-    const models = (list || []).map(name => ({ name, size: sizes.get(name) || 0, embed: isEmbedName(name) }));
+    // 进程内推理：直接列 data/models 里的 gguf，不再问 ollama 要 /api/tags
+    const llm = await localLlm();
+    const list = llm ? llm.listModels() : null;
+    const models = (list || []).map(m => ({ name: m.name, size: m.bytes || 0, embed: isEmbedName(m.name) }));
     return sendJson(res, 200, {
       alive: Array.isArray(list),
-      url: ollamaBase(settings),
+      dir: path.relative(ROOT, MODEL_DIR),
+      backend: llm ? (await llm.status().catch(() => ({})))?.kind || '' : '',
       models,
       chat: models.filter(m => !m.embed).map(m => m.name),
       embed: models.filter(m => m.embed).map(m => m.name),

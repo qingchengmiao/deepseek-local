@@ -154,14 +154,13 @@
 
 <h2><span class="n">3</span>摘要模型：本机没有就自动从国内镜像拉一个</h2>
 
-<p>长对话的压缩摘要优先交给本机 ollama 的小模型写——不走网络、不花 API 钱。问题是新机器上往往没装模型。现在这条路上加了自愈：</p>
+<p>长对话的压缩摘要优先交给本机进程内的小模型写——2026-11-25 起彻底不走 ollama：不开端口、不装服务、不花 API 钱。推理运行时是 <code>node-llama-cpp</code>，模型就是 <code>data/models</code> 里的一个 <code>.gguf</code>。新机器上往往一个模型都没有，这条路上有自愈：</p>
 
 <ol class="steps">
-  <li><b>触发</b>：要写摘要时发现本机 ollama 在线但<b>没有可用对话模型</b>，后台自动开始拉；也可以点设置里的「现在拉一个」手动触发。</li>
-  <li><b>先官方源</b>：<code>ollama pull qwen2.5:1.5b-instruct</code>（不行退 <code>qwen2.5:0.5b-instruct</code>）。</li>
-  <li><b>再国内镜像</b>：官方源拉不动，就依次换 <b>魔搭 ModelScope</b>（<code>modelscope.cn/models/&lt;repo&gt;/resolve/master/&lt;file&gt;</code>）与 <b>hf-mirror.com</b> 下 GGUF，存到 <code>data/models/</code>（先写 <code>.part</code> 再改名，按 2 MB 一步记进度）。</li>
-  <li><b>装进 ollama</b>：生成 Modelfile（<code>num_ctx 8192</code>、<code>temperature 0.3</code>、Qwen ChatML 模板）后 <code>ollama create</code>，之后当普通模型用。</li>
-  <li><b>只用一次</b>：同一个模型装过就复用；进度、来源、最近 20 行日志都能在 <code>GET /api/context/model-pull</code> 与设置页看到。</li>
+  <li><b>触发</b>：要写摘要时发现 <code>data/models</code> 里没有可用的对话 gguf，后台自动开始拉；也可以点设置里的「现在拉一个」手动触发。</li>
+  <li><b>直接从国内镜像下 GGUF</b>：依次换 <b>魔搭 ModelScope</b>（<code>modelscope.cn/models/&lt;repo&gt;/resolve/master/&lt;file&gt;</code>）与 <b>hf-mirror.com</b>，下 <code>qwen2.5-1.5b-instruct-q4_k_m.gguf</code>（不行退 0.5b），存到 <code>data/models/</code>（先写 <code>.part</code> 再改名，按 2 MB 一步记进度）。</li>
+  <li><b>下完即用</b>：没有 Modelfile、没有 <code>ollama create</code>、不用重启——进程内直接加载。</li>
+  <li><b>只用一次</b>：同一个模型下过就复用；进度、来源、最近 20 行日志都能在 <code>GET /api/context/model-pull</code> 与设置页看到。</li>
 </ol>
 
 <figure>
@@ -171,9 +170,10 @@
 
 <h3>可调、可验</h3>
 <ul>
-  <li>环境变量 <code>DSAPP_OLLAMA_CLI</code> 指定 ollama 可执行文件；<code>DSAPP_PULL_MIRRORS</code> 换镜像（自测就是这么注入假镜像的）。</li>
-  <li>自测脚本 <code>node tools\model-pull-test.mjs</code>：起假 ollama + 假镜像 + 假 CLI，验证「官方源失败 → 镜像下载 → <code>ollama create</code> → 可用」整条链路，<b>13 项全过</b>。</li>
-  <li>全失败时的文案是 <code>官方源和国内镜像都没拉成（检查网络或手动 ollama pull）</code>；摘要照旧退回 API，不阻塞对话。</li>
+  <li>环境变量 <code>DSAPP_PULL_MIRRORS</code> 换镜像（自测就是这么注入假镜像的）。</li>
+  <li>自测脚本 <code>node tools\model-pull-test.mjs</code>：起一个假镜像，验证「镜像下载 → 落到 data/models → 进程内可用 → 没再写 Modelfile」整条链路，<b>14 项全过</b>。</li>
+  <li>后端自动探测 <code>cuda → vulkan → cpu</code>：NVIDIA 走 CUDA，AMD / Intel 走 Vulkan，都没有就 CPU。同一台机器实测（qwen2.5-1.5b q4_k_m）：CUDA 590 tok/s、Vulkan 120 tok/s、CPU 81 tok/s。</li>
+  <li>全失败时的文案是 <code>国内镜像都没下成（检查网络，或手动把 gguf 放进 data/models）</code>；摘要照旧退回 API，不阻塞对话。</li>
 </ul>
 
 <div class="page-break"></div>
@@ -182,7 +182,7 @@
 
 <table>
   <tr><th>检查项</th><th>结果</th></tr>
-  <tr><td><code>tools\model-pull-test.mjs</code></td><td>13 通过 / 0 失败（假 ollama + 假镜像 + 假 CLI）</td></tr>
+  <tr><td><code>tools\model-pull-test.mjs</code></td><td>14 通过 / 0 失败（假镜像 + 进程内可用 + 没写 Modelfile）</td></tr>
   <tr><td><code>tools\import-preview-test.mjs</code></td><td>27 通过 / 0 失败（zip / JSON 整包 / 文本 / 认不出来）</td></tr>
   <tr><td><code>tools\import-page-test.mjs</code></td><td>15 通过 / 0 失败（认一认、导一次、会话 +2）</td></tr>
   <tr><td><code>tools\chat-drop-test.mjs</code></td><td>11 通过 / 0 失败（对话页拖入=附件、导入页拖入=导入）</td></tr>

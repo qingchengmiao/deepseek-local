@@ -3,10 +3,11 @@
 // 说明（写给以后看代码的人，也写给用户）：
 // - DeepSeek 没有 embeddings 接口（v1/embeddings 返回 404），所以检索默认走**本地词面索引**
 //   （汉字二元组 + 英文单词，词表即维度，BM25 打分）。这是词面匹配，不是语义匹配。
-// - 如果想要语义召回，可以接本机的 ollama 向量模型（如 nomic-embed-text）：
+// - 如果想要语义召回，可以放一个向量 gguf（bge / gte / minilm 之类）到 data/models：
 //   归档片段会存一份稠密向量，查询时和 BM25 分数混合排序。模型不可用时自动退回纯 BM25。
 // - 时间衰减用半衰期：weight = 0.5 ** (ageDays / halfLifeDays)。老的片段在召回排序里被压下去。
-// - 压缩摘要优先用本机小模型（ollama），没有就退回 DeepSeek API，都不可用时降级丢掉老消息。
+// - 压缩摘要优先用本机小模型（进程内跑 gguf，2026-11-25 起不再走 ollama 端口），没有就退回 DeepSeek API，
+//   都不可用时降级丢掉老消息。
 
 export const CTX_DEFAULTS = {
   ctxCompress: true, // 自动压缩
@@ -20,8 +21,7 @@ export const CTX_DEFAULTS = {
   ctxRagMinScore: 0.08,
   // ---- 摘要与归档
   ctxSummarizer: 'auto', // auto | local | api —— 压缩摘要用谁写
-  ctxLocalUrl: 'http://127.0.0.1:11434', // 本地 ollama 地址
-  ctxLocalModel: '', // 留空 = 自动挑一个最小的对话模型
+  ctxLocalModel: '', // 留空 = 自动挑一个最小的对话模型（data/models 里的 gguf）
   ctxAutoPull: true, // 本机没可用小模型时，自动从国内镜像拉一个
   ctxEmbedModel: 'auto', // auto | off | 具体模型名（如 nomic-embed-text）
   ctxArchive: true, // 压缩前把原文另存成 JSON，并纳入检索
@@ -421,7 +421,7 @@ export function messageAgeDays(conv, msg, i, total) {
   return span * (1 - (i + 1) / Math.max(1, total + 1)) + 0.01;
 }
 
-/** 稠密向量余弦（本地 ollama 向量用；两向量维度不一致算 0） */
+/** 稠密向量余弦（本机向量 gguf 算出来的用；两向量维度不一致算 0） */
 export function cosineDense(a, b) {
   if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length || !a.length) return 0;
   let dot = 0, na = 0, nb = 0;

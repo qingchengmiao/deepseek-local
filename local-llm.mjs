@@ -149,4 +149,174 @@ export function preparedPaths() {
   return [...preparedDirs];
 }
 
-export default { setRootDir, binsDir, findCudaRuntime, prepareDllPath, detectBackend, preparedPaths };
+// ---------------------------------------------------------------- 模型与推理
+// 模型就是 data/models 下的 .gguf 文件。没有 HTTP、没有 ollama、没有 11434 端口。
+
+let modelDir = null;
+let runtime = null;              // { kind, llama } —— 探测一次，全局复用
+const modelCache = new Map();    // gguf 绝对路径 → LlamaModel
+let chain = Promise.resolve();   // 串行队列：别让两路推理同时抢显存
+
+export function setModelDir(dir) {
+  modelDir = dir;
+}
+
+export function getModelDir() {
+  return modelDir;
+}
+
+/** data/models 里现有的 gguf */
+export function listModels() {
+  if (!modelDir) return [];
+  try {
+    return fs.readdirSync(modelDir)
+      .filter((f) => /\.gguf$/i.test(f))
+      .map((f) => ({ name: f, path: path.join(modelDir, f), bytes: safeSize(path.join(modelDir, f)) }));
+  } catch { return []; }
+}
+
+function safeSize(p) {
+  try { return fs.statSync(p).size; } catch { return 0; }
+}
+
+function isEmbedFile(name) {
+  return /embed|bge|gte|minilm|rerank/i.test(name);
+}
+
+/**
+ * 按名字找 gguf：给了名字就按名字（带不带 .gguf 都行），没给就挑一个「不像向量模型」的。
+ * 找不到返回 null —— 调用方据此回落 API。
+ */
+export function resolveModelPath(name = '') {
+  const models = listModels();
+  if (!models.length) return null;
+  const want = String(name || '').trim();
+  if (want) {
+    const hit = models.find((m) => m.name === want)
+      || models.find((m) => m.name.toLowerCase() === `${want.toLowerCase()}.gguf`)
+      || models.find((m) => m.name.toLowerCase().includes(want.toLowerCase()));
+    if (hit) return hit.path;
+  }
+  const chat = models.filter((m) => !isEmbedFile(m.name));
+  if (chat.length) return chat.sort((a, b) => a.bytes - b.bytes)[0].path;
+  return null;
+}
+
+export function resolveEmbedModelPath(name = '') {
+  const models = listModels();
+  const want = String(name || '').trim();
+  if (want && want !== 'auto' && want !== 'off') {
+    const hit = models.find((m) => m.name === want || m.name.toLowerCase().includes(want.toLowerCase()));
+    if (hit) return hit.path;
+  }
+  const emb = models.filter((m) => isEmbedFile(m.name));
+  return emb.length ? emb[0].path : null;
+}
+
+/** 探测并缓存后端的 llama 实例 */
+async function getRuntime() {
+  if (runtime?.llama) return runtime;
+  const found = await detectBackend();
+  if (!found.llama) {
+    const why = found.tried.map((t) => `${t.kind}:${t.ok ? 'ok' : t.error}`).join(' ');
+    throw new Error(`本机没有可用的推理后端（${why}）`);
+  }
+  runtime = { kind: found.kind, llama: found.llama, tried: found.tried };
+  return runtime;
+}
+
+async function loadModel(modelPath) {
+  if (modelCache.has(modelPath)) return modelCache.get(modelPath);
+  const { llama } = await getRuntime();
+  const model = await llama.loadModel({ modelPath });
+  modelCache.set(modelPath, model);
+  return model;
+}
+
+/** 串行跑，避免并发推理把显存撑爆 */
+function queue(fn) {
+  const next = chain.then(fn, fn);
+  // 无论成败都让队列继续
+  chain = next.then(() => {}, () => {});
+  return next;
+}
+
+/**
+ * 进程内对话补全（摘要/整理用）。
+ * 返回 { text, model }；找不到模型抛错，由调用方决定回落 API。
+ */
+export async function chat({ model: modelName, system = '', user, maxTokens = 700, temperature = 0.2, contextSize = 16384 } = {}) {
+  const modelPath = resolveModelPath(modelName);
+  if (!modelPath) throw new Error('本机没有 gguf 对话模型（data/models 里没有 .gguf）');
+  return queue(async () => {
+    const { LlamaChatSession } = await import('node-llama-cpp');
+    const model = await loadModel(modelPath);
+    // 上下文按需给：摘要长文要给大，别一上来就按最大分配显存
+    const ctx = await model.createContext({ contextSize: Math.min(contextSize, model.trainContextSize || contextSize) });
+    try {
+      const session = new LlamaChatSession({ contextSequence: ctx.getSequence(), systemPrompt: system || undefined });
+      const text = String(await session.prompt(user, { maxTokens, temperature }) || '').trim();
+      if (!text) throw new Error('本地模型返回了空内容');
+      return { text, model: path.basename(modelPath) };
+    } finally {
+      try { await ctx.dispose(); } catch {}
+    }
+  });
+}
+
+/** 进程内向量（可选增强；没有向量 gguf 就返回 null，调用方退回词面检索） */
+export async function embed({ model: modelName, texts = [] } = {}) {
+  const modelPath = resolveEmbedModelPath(modelName);
+  if (!modelPath) return null;
+  if (!texts.length) return [];
+  return queue(async () => {
+    const model = await loadModel(modelPath);
+    const ctx = await model.createEmbeddingContext({ contextSize: 8192 });
+    try {
+      const out = [];
+      for (const t of texts) {
+        const r = await ctx.getEmbeddingFor(String(t));
+        out.push(Array.from(r.vector));
+      }
+      return out;
+    } finally {
+      try { await ctx.dispose(); } catch {}
+    }
+  });
+}
+
+/** 状态：用哪个后端、有哪些模型（给 /api/local/* 与设置页） */
+export async function status() {
+  let kind = runtime?.kind || null;
+  let error = '';
+  if (!kind) {
+    try {
+      const { kind: k } = await getRuntime();
+      kind = k;
+    } catch (e) { error = String(e.message || e); }
+  }
+  const models = listModels();
+  return {
+    kind,
+    error,
+    dir: modelDir,
+    models: models.map((m) => m.name),
+    chatModel: resolveModelPath('') ? path.basename(resolveModelPath('')) : '',
+    embedModel: resolveEmbedModelPath('') ? path.basename(resolveEmbedModelPath('')) : '',
+    cached: modelCache.size,
+  };
+}
+
+/** 释放全部模型与后端（退出时调用；测试里也用它清场） */
+export async function disposeAll() {
+  for (const m of modelCache.values()) { try { await m.dispose(); } catch {} }
+  modelCache.clear();
+  if (runtime?.llama) { try { await runtime.llama.dispose(); } catch {} }
+  runtime = null;
+}
+
+export default {
+  setRootDir, binsDir, findCudaRuntime, prepareDllPath, detectBackend, preparedPaths,
+  setModelDir, getModelDir, listModels, resolveModelPath, resolveEmbedModelPath,
+  chat, embed, status, disposeAll,
+};

@@ -38,6 +38,7 @@ await liveGuard(BASE, 'context-test');
 const MOCK = 'http://127.0.0.1:8899';
 const DATA_DIR = process.env.DSAPP_DATA || 'data';
 const RECORD = process.env.MOCK_RECORD || 'data/mock-last.json';
+const SEQ = process.env.MOCK_SEQ || 'data/mock-seq.json';
 
 // ---------------------------------------------------------------- 纯函数
 
@@ -228,6 +229,9 @@ async function live() {
   }
 
   await mockUp();
+  // 记一个时间点：假上游的流水（data/mock-seq.json）里每条都带 at，
+  // 只看这之后发的请求，免得被上一次跑测留下的记录骗过去。
+  const mockT0 = Date.now();
   const convIds = [];
   const filler = '这段是填充，用来撑大上下文预算，看看压缩会不会触发。'.repeat(14);
   try {
@@ -265,13 +269,29 @@ async function live() {
 
     for (let i = 0; i < 9; i++) await send(`第 ${i + 2} 轮：继续聊 ${filler}`);
 
-    const st = (await mathJson('/api/conversations/' + convId + '/context')).data;
+    // 压缩是后台任务：排进去后延迟 1.5s 才跑，本机小模型写摘要还要 1~3s，
+    // 所以轮次一结束就立刻读状态会读到「还没压」。这里轮询等它落地，最多 40 秒。
+    let st = (await mathJson('/api/conversations/' + convId + '/context')).data;
+    for (let i = 0; i < 80 && !(st && st.memory && st.memory.covered > 0); i++) {
+      await new Promise(r => setTimeout(r, 500));
+      st = (await mathJson('/api/conversations/' + convId + '/context')).data;
+    }
+    // 压缩是后台任务：记忆落库之后，**下一轮**聊天才会把「对话记忆」拼进 system。
+    // 前面那 10 轮都在压缩之前，流水里自然一条都没有；这里补发一轮让记忆块真的发出去。
+    await send('压缩完再来一轮：蓝鲸心率还是每分钟八次吧？' + filler);
+    // 本机推理是进程内的（2026-11-25 起不再问 ollama 端口）：data/models 里有没有 gguf，
+    // 直接决定摘要引擎是 local 还是按设计回落 API。
+    const lmNow = (await mathJson('/api/local-models')).data;
+    const hasLocal = !!(lmNow && lmNow.alive);
     check('长对话后建了向量索引', st.indexChunks > 0, `chunks=${st.indexChunks}`);
     check('触发了自动压缩', !!st.memory && st.memory.covered > 0, st.memory ? `covered=${st.memory.covered}, tokens=${st.memory.tokens}, calls=${st.memory.calls}` : '没压缩');
     check('记忆里是模型写的结构化摘要', !!st.memory && (/##\s*(事实|长期事实)/.test(st.memory.text) || st.memory.text.includes('关键词索引')), st.memory ? st.memory.text.slice(0, 20) : '');
     check('上下文状态报得出摘要引擎', !!st.summarizer && ['local', 'api', 'none'].includes(st.summarizer.engine), JSON.stringify(st.summarizer || {}));
-    // 默认优先本机：engine 必须是 local；单段记忆可能因为「本地摘要质量不合格」回落到 API（summaryLooksBad 的质检），这是设计内的
-    check('摘要引擎默认是本机优先', !!st.summarizer && ['local', 'auto'].includes(st.summarizer.engine), JSON.stringify(st.summarizer || {}));
+    // 默认优先本机：data/models 里有 gguf 时 engine 必须是 local；没有 gguf 就按设计回落 API。
+    // （单段记忆仍可能因为「本地摘要质量不合格」回落到 API —— summaryLooksBad 的质检，设计内的）
+    check('摘要引擎按有没有本机 gguf 决定（有就 local，没有回落 API）',
+      !!st.summarizer && (hasLocal ? ['local', 'auto'].includes(st.summarizer.engine) : st.summarizer.engine === 'api'),
+      `${JSON.stringify(st.summarizer || {})} hasLocal=${hasLocal}`);
     const memModel = String((st.memory && st.memory.model) || '');
     check('压缩确实用的是本机或按质量回落 API', !memModel || /^local:/.test(memModel) || /^deepseek-/.test(memModel), memModel);
 
@@ -279,7 +299,20 @@ async function live() {
       const payload = JSON.parse(await readFile(RECORD, 'utf8'));
       const body = payload.body || payload;
       const sys = (body.messages || []).filter(m => m.role === 'system').map(m => String(m.content));
-      check('发给上游的请求里有记忆块', sys.some(s => s.includes('【对话记忆')), `system 条数=${sys.length}`);
+      const hasMemInSeq = await (async () => {
+        // mock-last.json 只留最后一条请求，而最后一条未必是带记忆块的那轮
+        // （压缩请求本身也发到同一个上游，会把记录盖掉）。
+        // 所以查假上游的流水：这次跑测发过的请求里，有没有一条带「【对话记忆 …】」。
+        for (let i = 0; i < 20; i++) {
+          try {
+            const seq = JSON.parse(await readFile(SEQ, 'utf8'));
+            if (Array.isArray(seq) && seq.some(r => r && r.at >= mockT0 && r.hasMemoryBlock)) return true;
+          } catch {}
+          await new Promise(r => setTimeout(r, 250));
+        }
+        return false;
+      })();
+      check('发给上游的请求里有记忆块', hasMemInSeq, `最后一条 system 条数=${sys.length}`);
       const historyMsgs = (body.messages || []).filter(m => m.role === 'user' || m.role === 'assistant');
       check('老消息没全量塞进去（原文条数被压下来了）', historyMsgs.length < st.historyMessages, `${historyMsgs.length} < ${st.historyMessages}`);
     }
@@ -292,8 +325,8 @@ async function live() {
       check('每条命中都带时间权重与年龄', pv.data.hits.every(h => typeof h.weight === 'number' && typeof h.ageDays === 'number'));
     }
 
-    console.log('8) 本机小模型（ollama）');
-    const lm = (await mathJson('/api/local-models')).data;
+    console.log('8) 本机小模型（进程内 gguf，data/models）');
+    const lm = lmNow;
     check('能列出本机模型', typeof lm.alive === 'boolean' && Array.isArray(lm.models), `alive=${lm.alive} 模型 ${lm.models?.length || 0} 个`);
     if (lm.alive && lm.pick) {
       check('自动挑了对话模型（不是 embed 模型）', !!lm.pick && !/embed|bge|gte/i.test(lm.pick), lm.pick);
@@ -302,7 +335,7 @@ async function live() {
       check('本机模型真能写摘要（关掉思考后很快）', tr.ok === true && String(tr.sample || '').length > 0, `${tr.model} ${tr.ms}ms → ${String(tr.sample || tr.error || '').slice(0, 40)}`);
       check('摘要耗时在可接受范围', Date.now() - t0 < 120000, `${Math.round((Date.now() - t0) / 1000)}s`);
     } else {
-      console.log('  （本机 ollama 没起，跳过真调；压缩会走 API）');
+      console.log('  （data/models 里没有 gguf，跳过真调；压缩会走 API）');
     }
 
     console.log('9) 压缩前归档原文');
@@ -330,7 +363,12 @@ async function live() {
     // 把遗忘阈值调低，让「按时间权重概括 + 遗忘」这一级能在这条测试会话里触发
     await put('/api/settings', { ctxForgetRatio: 0.25, ctxCompress: true, ctxProgressive: true, ctxActivateScore: 0.9 });
     await send('再补一句：记住蓝鲸心率是每分钟八次。' + filler);
-    const st3 = (await mathJson('/api/conversations/' + convId + '/context')).data;
+    // 合并成长期记忆也是后台任务（1.5s 延迟 + 本机写摘要），不能发完就问，轮询等它落地
+    let st3 = (await mathJson('/api/conversations/' + convId + '/context')).data;
+    for (let i = 0; i < 80 && !(st3 && st3.memory && (st3.memory.forgetStep || 0) >= 1); i++) {
+      await new Promise(r => setTimeout(r, 500));
+      st3 = (await mathJson('/api/conversations/' + convId + '/context')).data;
+    }
     check('占用过阈值后做了时间加权概括', (st3.memory?.forgetStep || 0) >= 1 && !!st3.memory?.consolidated, `forgetStep=${st3.memory?.forgetStep} consolidated=${!!st3.memory?.consolidated}`);
     check('概括结果带关键词索引或长期事实段', !!st3.memory && (st3.memory.text.includes('关键词索引') || st3.memory.text.includes('长期事实')), String(st3.memory?.text || '').slice(0, 24));
 
@@ -411,7 +449,6 @@ async function live() {
       ctxSummarizer: orig.ctxSummarizer ?? CTX_DEFAULTS.ctxSummarizer,
       ctxLocalModel: orig.ctxLocalModel ?? CTX_DEFAULTS.ctxLocalModel,
       ctxEmbedModel: orig.ctxEmbedModel ?? CTX_DEFAULTS.ctxEmbedModel,
-      ctxLocalUrl: orig.ctxLocalUrl ?? CTX_DEFAULTS.ctxLocalUrl,
       ctxArchive: orig.ctxArchive ?? CTX_DEFAULTS.ctxArchive,
       ctxStepRatio: orig.ctxStepRatio ?? CTX_DEFAULTS.ctxStepRatio,
       ctxForgetRatio: orig.ctxForgetRatio ?? CTX_DEFAULTS.ctxForgetRatio,

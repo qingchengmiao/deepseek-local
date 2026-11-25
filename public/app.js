@@ -1653,16 +1653,16 @@ async function openSettings() {
   const modelOpts = models.map(m => `<option value="${esc(m.id)}">${esc(m.label)}${m.note ? '（' + esc(m.note) + '）' : ''}</option>`).join('');
   const langOpts = langs.map(l => `<option value="${esc(l)}">${esc(l)}</option>`).join('');
 
-  // 本机小模型（ollama）：用来写压缩摘要、算归档向量
-  let local = { alive: false, models: [], chat: [], embed: [], pick: '', embedPick: '' };
-  try { local = await api('/api/local-models'); } catch {}
+  // 本机小模型（进程内跑 gguf，放在 data/models）：用来写压缩摘要、算归档向量
+  let local = { alive: false, models: [], chat: [], embed: [], pick: '', embedPick: '', dir: '', backend: '' };
+  try { local = { ...local, ...(await api('/api/local-models')) }; } catch {}
   const localModelOpts = [
     `<option value="">自动（${esc(local.pick || '没探到')}）</option>`,
     ...(local.chat || []).map(n => `<option value="${esc(n)}">${esc(n)}</option>`),
   ].join('');
   const localTip = local.alive
-    ? `本机 ollama 在线：${local.chat.length} 个对话模型、${local.embed.length} 个向量模型，自动选 ${local.pick || '—'}。`
-    : '本机 ollama 没连上（127.0.0.1:11434）：压缩会退回 API，装了 ollama 再点「测一下」。';
+    ? `本机推理就绪（${esc(local.backend || 'cpu')}）：${local.chat.length} 个对话模型、${local.embed.length} 个向量模型，自动选 ${esc(local.pick || '—')}。`
+    : `本机还没有 gguf 模型（${esc(local.dir || 'data/models')}）：压缩会退回 API；点「拉一个」从国内镜像下，或用不上的话就让它空着。`;
 
   // 自我调整：模型自己调过的温度与口径（落在 data/self-tune.json）
   let st = { temp: null, addendum: { global: '', human: '', qq: '' }, history: [], enabled: true, active: false };
@@ -1946,14 +1946,13 @@ async function openSettings() {
         <select id="setCtxLocalModel" style="flex:1">${localModelOpts}</select>
         <input type="text" id="setCtxEmbedModel" style="flex:1" placeholder="向量模型（auto / off / 名字）" value="${esc(fresh.ctxEmbedModel || 'auto')}">
       </div>
-      <div class="tip">摘要默认挑本机最小的对话模型；右边填 <code>auto</code> 会用 ollama 里的 embed 模型给归档片段算向量（混合检索），填 <code>off</code> 就纯词面 BM25。</div>
-      <input type="text" id="setCtxLocalUrl" value="${esc(fresh.ctxLocalUrl || 'http://127.0.0.1:11434')}" placeholder="http://127.0.0.1:11434">
+      <div class="tip">摘要默认挑本机最小的对话模型；右边填 <code>auto</code> 会用 data/models 里的向量 gguf 给归档片段算向量（混合检索），填 <code>off</code> 就纯词面 BM25。模型就放在 <code>${esc(local.dir || 'data/models')}</code>。</div>
     </div>
 
     <div class="switch-row">
       <div>
         <div class="lbl">缺模型时自动拉一个（国内镜像优先）</div>
-        <div class="desc">本机 ollama 里没有能写摘要的小模型时，自动拉：先试 ollama 官方源，拉不动就换魔搭 / hf-mirror 下 GGUF 再用 ollama create 装进去</div>
+        <div class="desc">data/models 里没有能写摘要的 gguf 时，自动从魔搭 / hf-mirror 下 GGUF 落到该目录，下载完进程内直接跑</div>
       </div>
       <input type="checkbox" id="setCtxAutoPull" ${fresh.ctxAutoPull !== false ? 'checked' : ''}>
     </div>
@@ -2336,7 +2335,6 @@ async function openSettings() {
       ctxSummarizer: body.querySelector('#setCtxSummarizer').value,
       ctxLocalModel: body.querySelector('#setCtxLocalModel').value,
       ctxEmbedModel: (body.querySelector('#setCtxEmbedModel').value || '').trim() || 'auto',
-      ctxLocalUrl: (body.querySelector('#setCtxLocalUrl').value || '').trim(),
       ctxAutoPull: body.querySelector('#setCtxAutoPull').checked,
       ctxArchive: body.querySelector('#setCtxArchive').checked,
       ctxStepRatio: (Number(body.querySelector('#setCtxStep').value) || 33) / 100,
@@ -4919,8 +4917,8 @@ function pluginsPageHtml(ch) {
       go: 'settings', goLabel: '去设置',
     })}
     ${chRow({
-      title: '本机小模型（ollama）', desc: '压缩摘要优先用本机小模型，失败再回落到 API；归档向量也靠它。',
-      status: local.ok ? `在线 · ${local.models} 个模型 · 自动用 ${esc(local.chat || '—')}` : '没连上 127.0.0.1:11434',
+      title: '本机小模型（进程内 gguf）', desc: '压缩摘要优先用本机小模型，失败再回落到 API；归档向量也靠它。模型就是 data/models 里的 .gguf，不开端口。',
+      status: local.ok ? `就绪${local.backend ? `（${esc(local.backend)}）` : ''} · ${local.models} 个模型 · 自动用 ${esc(local.chat || '—')}` : `data/models 里还没有 gguf（${esc(local.dir || 'data/models')}）`,
       control: '', go: 'settings', goLabel: '去设置',
     })}
   </div>`;

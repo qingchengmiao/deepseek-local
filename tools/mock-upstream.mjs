@@ -85,6 +85,9 @@ async function handleChat(req, res, body) {
     hasDigestPrompt: msgs0.some(m => typeof m.content === 'string' && m.content.includes('你在给下一轮写回答打底')),
     hasDigestBlock: msgs0.some(m => typeof m.content === 'string' && m.content.includes('【V4.1 Flash 看完这段音视频后扒出来的要点】')),
     hasImageParts: msgs0.some(m => Array.isArray(m.content) && m.content.some(b => b && b.type === 'image_url')),
+    // 上下文压缩后，正常聊天请求里应该带上「【对话记忆 …】」那段 system。
+    // 记进流水是因为 mock-last.json 只留最后一条，而最后一轮未必是带记忆的那一轮。
+    hasMemoryBlock: msgs0.some(m => typeof m.content === 'string' && m.content.includes('【对话记忆')),
     temperature: typeof payload.temperature === 'number' ? payload.temperature : null,
     tunePrompt: (msgs0.find(m => typeof m.content === 'string' && m.content.includes('【这一轮的临时设定')) || {}).content || '',
     at: Date.now(),

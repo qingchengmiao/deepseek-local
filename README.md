@@ -145,7 +145,7 @@ New-Item -ItemType Junction -Path dist\DeepSeek-win32-x64\data -Target (Resolve-
 **要说实话的地方**：
 
 - DeepSeek 没有 embeddings 接口（`/v1/embeddings` 是 404），所以历史索引是本机算的**词面**索引（BM25 + 词表维度），**认词，不认近义词**——查「心率」找得到「心率八次」，查「脉搏」不一定。
-- 语义那部分靠本机 ollama：`ctxEmbedModel: auto` 时会给**归档区间**算一条 `nomic-embed-text` 向量（768 维），检索时和历史 BM25 混分（`max(bm25, bm25*0.6 + 余弦*0.4)`）。归档按区间存一条向量、不按段存，否则几千段 × 768 维会把 JSON 撑爆。没有 ollama 就自动退化成纯 BM25。
+- 语义那部分靠本机进程内的向量 gguf（2026-11-25 起不再走 ollama 端口）：`ctxEmbedModel: auto` 时把 `data/models` 里挑中的向量模型（名字带 `embed/bge/gte/minilm/rerank`，如 `bge-m3`）加载进进程，给**归档区间**算一条向量，检索时和历史 BM25 混分（`max(bm25, bm25*0.6 + 余弦*0.4)`）。归档按区间存一条向量、不按段存，否则几千段 × 768 维会把 JSON 撑爆。目录里没有向量模型就自动退化成纯 BM25。
 - 归档检索目前和历史检索覆盖同一段旧消息（历史索引也索引到了），所以命中通常会由历史那份先出；归档真正的价值是**原文备份**（摘要丢细节时能翻）和以后真裁剪历史时的兜底。
 - 关键词是从消息里按词频 + 跨消息出现次数抽的，纯填充文本抽出来的会是「备份、存储、导出」这类词，不一定是人觉得重要的那个；索引卡只是线索，模型真要细节仍然靠「展开第 k 条」。
 
@@ -155,16 +155,16 @@ New-Item -ItemType Junction -Path dist\DeepSeek-win32-x64\data -Target (Resolve-
 
 ### 摘要模型没了？会自动从国内镜像拉一个
 
-压缩摘要优先交给本机 ollama 的小模型写（不走网络、不花 API 钱）。以前本机没装模型就只能退回 API，现在加了一条自愈路径：
+压缩摘要交给**本机进程内的 gguf**（2026-11-25 起彻底不走 ollama，不开端口、不装服务、不花 API 钱）。模型就是 `data/models` 里的 `.gguf`，以前没模型就只能退回 API，现在加了一条自愈路径：
 
-- 触发：设置里「缺模型时自动拉一个（国内镜像优先）」（`ctxAutoPull`，默认开）。任何一次要写摘要时发现本机 ollama 在线但**没有可用对话模型**，就后台开始拉；面板上「现在拉一个」也能手动触发（`POST /api/context/model-pull`）。
-- 顺序：先按目标试官方源 `ollama pull`（`qwen2.5:1.5b-instruct`，不行退 `qwen2.5:0.5b-instruct`）；官方源拉不动，就依次换**国内镜像**：
+- 触发：设置里「缺模型时自动拉一个（国内镜像优先）」（`ctxAutoPull`，默认开）。任何一次要写摘要时发现 `data/models` 里**没有可用的对话 gguf**，就后台开始拉；面板上「现在拉一个」也能手动触发（`POST /api/context/model-pull`）。
+- 顺序：按目标依次试**国内镜像**：
   - 魔搭 ModelScope：`https://modelscope.cn/models/<repo>/resolve/master/<file>`
   - HF 镜像 hf-mirror.com：`https://hf-mirror.com/<repo>/resolve/main/<file>`
-  下到 `data/models/*.gguf`（先写 `.part` 再改名，按 2 MB 一步记进度），再生成 Modelfile（`num_ctx 8192`、`temperature 0.3`、Qwen ChatML 模板）用 `ollama create` 装成一个正常 ollama 模型。
-- 只用一次：同一个模型装过就复用，不重复下载；`GET /api/context/model-pull` 能看进度、来源、日志（最近 20 行），设置页那块状态会自己轮询刷新。
-- 可调：环境变量 `DSAPP_OLLAMA_CLI`（指定 ollama 可执行文件）、`DSAPP_PULL_MIRRORS`（JSON 数组换镜像，测试就是这么注入假镜像的）。
-- 兜底：官方源和国内镜像都失败就写清原因（`官方源和国内镜像都没拉成（检查网络或手动 ollama pull）`），摘要照旧退回 API，不阻塞对话。
+  目标先是 `qwen2.5-1.5b-instruct-q4_k_m.gguf`，不行退 0.5b。下到 `data/models/`（先写 `.part` 再改名，按 2 MB 一步记进度），**下完直接进程内加载就能用**——不用生成 Modelfile、不用 `ollama create`、不用重启服务。
+- 只用一次：同一个文件下过就复用，不重复下载；`GET /api/context/model-pull` 能看进度、来源、日志（最近 20 行），设置页那块状态会自己轮询刷新。
+- 可调：环境变量 `DSAPP_PULL_MIRRORS`（JSON 数组换镜像，测试就是这么注入假镜像的）。
+- 兜底：镜像都没下成就写清原因（`国内镜像都没下成（检查网络，或手动把 gguf 放进 data/models）`），摘要照旧退回 API，不阻塞对话；缺推理运行时则是 `本机推理没装起来（缺 node_modules/node-llama-cpp），下了模型也跑不了`。
 
 ### 每个会话一套上下文参数（预算最多顶到 1M）
 
@@ -182,12 +182,22 @@ New-Item -ItemType Junction -Path dist\DeepSeek-win32-x64\data -Target (Resolve-
 - 还没压过档的会话会回 400 `NO_RECORDS`（「先压一次再整合」）；只有一段记忆时会回 `skipped: true`，不算失败。
 - 它和「占用过 50% 自动做的那次概括」是同一个函数（`consolidateMemory`），手动按钮只是不必等占用涨上去。
 
-装 ollama 之后建议拉个小模型（本机已有 qwen3.5:4b 也能用）：
+本机推理不需要装任何服务：把 gguf 放进 `data/models/` 就行（或直接点设置里「拉一个」，它自己从国内镜像下）。
 
 ```powershell
-ollama pull qwen2.5:1.5b-instruct   # 更快，摘要这种活够用
-ollama pull nomic-embed-text        # 想要语义混排在设置里把向量模型设成 auto
+# 放进去就能用，不用注册、不用重启
+data\models\qwen2.5-1.5b-instruct-q4_k_m.gguf    # 写摘要（约 1.0 GB）
+data\models\bge-m3-q8_0.gguf                      # 想要语义混排，就给向量模型设成 auto
 ```
+
+推理运行时是 `node-llama-cpp` 的预编译后端（安装包里已带上五个：`win-x64` CPU、`win-x64-cuda`、`win-x64-vulkan`、`win-arm64` 等）。从源码目录起服务时如果报「本机推理没装起来」，按下面装一次：
+
+```powershell
+npm install node-llama-cpp@3.22.3 --save
+cd node_modules\node-llama-cpp; node .\dist\cli\cli.js postinstall   # 拉预编译后端（npm 若拦了 postinstall 就手动跑这句）
+```
+
+CUDA 后端还要 CUDA 13 的 cuBLAS：`cublas64_13.dll`、`cublasLt64_13.dll` 放到 PATH 里能找到的目录（本程序会自动把 Ollama 的 `cuda_v13` 目录、或 `data/local-llm/cuda` 塞进 PATH）。没有 NVIDIA 显卡就用 Vulkan（A 卡 / 核显 / Intel 都能跑），没有显卡就退回 CPU，探测顺序 `cuda → vulkan → cpu`。
 
 ---
 
@@ -526,7 +536,7 @@ pwsh -NoProfile -File tools\_run-fresh.ps1 -Tests qq-test,context-test,route-tes
 
 1. **计划任务走 `wscript.exe //B host-run.vbs`**，vbs 里 `WScript.Shell.Run(..., 0, True)` —— 窗口样式 0，从头就没有窗口；`True` 是等它跑完，外面再套一层循环（退出码 3 = 已经在跑，就等 60 秒；其余 10 秒后重来），所以任务常驻 `Running`，宿主崩了自己会回来。之前任务是 `cmd.exe /c host-run.cmd`，那个 cmd 窗口会一直挂在桌面上（不是闪一下，是赖着不走）。
 2. **宿主自己藏控制台**：`DSLNapCatHost.exe` 是 CUI 程序，`wmain` 一进来就 `ShowWindow(GetConsoleWindow(), SW_HIDE)`。手动双击 `host-run.cmd` 时窗口也会立刻消失；更关键的是 `NapCatWinBootMain.exe` 是 CUI、会继承这个隐藏控制台，所以它不会再自己开一个可见窗口（QQ.exe 本身是 GUI，不受影响）。
-3. **应用里所有子进程都带 `windowsHide: true`**：`runCli`（宿主 status / ollama / ffmpeg）、`startNapcat`（老的 `cmd /c 扫码登录.bat` 路径，之前是 `false`）、`execFile`（模型下载）、`openBrowser` 的 `cmd /c start`。
+3. **应用里所有子进程都带 `windowsHide: true`**：`runCli`（宿主 status / NapCat / ffmpeg）、`startNapcat`（老的 `cmd /c 扫码登录.bat` 路径，之前是 `false`）、`execFile`（模型下载）、`openBrowser` 的 `cmd /c start`。
 4. 老的「重启 NapCat」路径同理走 `startNapcat`，已经一起静默。
 
 验证方法（可复现）：用 `EnumWindows` 每 60ms 采样一次可见的 `ConsoleWindowClass` 窗口，同时连打 128 次 `/api/napcat/host`、再整轮重启应用并连点「启动隔离实例」—— 两次采样捕获到的可见控制台窗口都是 **0**。
@@ -668,8 +678,8 @@ node tools/backfill-qq-images.mjs <会话id> --apply  # 真写
 - 旧设置里如果存着 `deepseek-chat` / `deepseek-reasoner` 这种历史模型名，服务端会自动迁移到 `deepseek-flash`，不用手动改。
 - **没有「视频理解」这种 API**。视频是本地拆开的：ffmpeg 抽音轨 → 按 ≤110 秒切片 → 逐片调 `/v1/tools/asr` 转写 → 再按时间均匀抽关键帧，最后把「转写文本 + 几张图」当普通图文消息发过去。所以视频理解的上限取决于转写质量与抽帧密度；帧数在设置里可调（0–12，默认 6）。
 - 每条消息最多回传 12 帧（`mediaBlocks` 里切），单帧最长边缩到 1280 再编码，免得一次请求体撑爆 48 MiB。
-- **本机没有 embeddings 接口可用**，所以历史「向量索引」是词面的（BM25 + 词表维度），不是语义向量：认词、不认近义词。别在 README/界面上把它说成语义检索。语义那点能力是 ollama 的 embed 模型给的，且只用在归档区间上。
-- **ollama 里带思考的模型（qwen3 系列等）会把正文塞进 `message.thinking`、`content` 留空**。压缩摘要时请求里加了 `think: false`，400 就退回不带该参数、并把 thinking 当兜底——不加这一步，摘要永远是「本地模型返回了空摘要」（实测 qwen3.5:4b）。
+- **本机嵌入现在是进程内的向量 gguf**（`data/models` 里名字带 `embed/bge/gte/minilm/rerank` 的那一个）：有就给归档区间算语义向量、检索时和 BM25 混分；没有就纯词面 BM25——认词、不认近义词。别在 README/界面上把它说成通用语义检索，语义那点能力只在「有向量模型 + 归档区间」这一层。
+- **本机小模型输出直接取正文**：进程内跑 gguf 不经过 chat 协议那层，`local-llm.mjs` 的 `chat()` 拿到什么就是什么。以前走 ollama 时，带思考的模型（qwen3 系列等）会把正文塞进 `message.thinking`、`content` 留空，那时候得靠请求里加 `think: false` 兜；现在没有这个坑了。
 - 归档的 `from/to` 是**历史数组下标**（user/assistant 过滤后的），不是 `conv.messages` 下标；两套下标混用会让召回的「第几条」和年龄全错。改归档相关代码时统一用 `history[...]`。
 - 召回的相关度阈值（默认 0.08）只看相关度，时间衰减只调排序优先级——否则几十天前的老会话会被权重直接判死、召回全空。
 - **分档压缩的触发看「历史总 token / budget」这个 raw 比例**，不是压缩后的占用——否则压完比例掉回去，永远涨不到下一档。`step = floor(raw / 0.33)`、`forgetStep = floor(raw / 0.5)`，各自和 `memory.step / memory.forgetStep` 比大小，涨了才动。
