@@ -1922,15 +1922,39 @@ async function pushSend({ text, uid = '', group = '', kind = 'manual' } = {}) {
 //   3) 修完推一条 QQ 消息告诉人（如果那时候通道是通的）。
 // 不做的事：不去猜模型错误、不自动改 Key。
 const healState = { at: 0, rounds: 0, actions: [], needLogin: false, lastError: '', log: [] };
-// 掉线计时：QQ 进程还在、但 OneBot 端口不通 —— 宿主 supervisor 对这种状态只等不救，
-// 所以「登录被挤下线」之后能僵十几分钟到几小时。这里自己记账，按 45 秒 / 5 分 / 15 分各救一次。
-const healDown = { since: 0, restarts: 0, lastRestart: 0, why: '' };
+// 掉线计时：QQ 进程还在、但 OneBot 端口不通 —— 宿主 supervisor 对这种状态只等不救。
+// 2026-11-25 的教训：日志里 KickedOffLine = 服务端把登录态作废了，重启进程只会起来停在「等扫码」，
+// 救不回来还加重风控。所以被踢就只提醒人扫码；只有「没被踢、像网络断」才重启一次试试。
+const healDown = { since: 0, restarts: 0, lastRestart: 0, lastNote: 0, why: '' };
 
 function healLog(line) {
   const s = `[${new Date().toLocaleString('zh-CN', { hour12: false })}] ${line}`;
   healState.log.push(s);
   if (healState.log.length > 40) healState.log.splice(0, healState.log.length - 40);
   fs.promises.appendFile(path.join(DATA, 'napcat-heal.log'), s + '\n').catch(() => {});
+}
+
+/**
+ * 弹一条 Windows 通知。QQ 掉线时自己的推送通道（OneBot）也断了，
+ * 只剩本机能叫人；失败一律静默，别让提醒本身再出问题。
+ */
+function toastLocal(title, text) {
+  try {
+    const q = s => String(s || '').replace(/'/g, "''");
+    const ps = [
+      "$ErrorActionPreference='SilentlyContinue'",
+      '[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null',
+      '$t = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)',
+      "$n = $t.GetElementsByTagName('text')",
+      `$n.Item(0).AppendChild($t.CreateTextNode('${q(title)}')) > $null`,
+      `$n.Item(1).AppendChild($t.CreateTextNode('${q(text)}')) > $null`,
+      "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('DeepSeek Local').Show([Windows.UI.Notifications.ToastNotification]::new($t))",
+    ].join('\n');
+    const b64 = Buffer.from(ps, 'utf16le').toString('base64');
+    const p = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', b64], { stdio: 'ignore', windowsHide: true });
+    p.on('error', () => {});
+    p.unref?.();
+  } catch { /* 提醒失败不影响主流程 */ }
 }
 
 /**
@@ -1949,7 +1973,12 @@ function napcatDownReason(settings) {
       .sort((a, b) => b.t - a.t);
     if (!files.length) return '';
     const buf = fs.readFileSync(files[0].p, 'utf8').slice(-12000);
-    const hits = buf.match(/.*(KickedOffLine|登录已失效|账号状态变更为离线|正在重启 Worker).*/g);
+    // 踢线那行往往不是最后一行（后面紧跟「账号状态变更为离线」「正在重启 Worker」），
+    // 所以先单独找 KickedOffLine：找得到就用它，救活策略要靠这一行区分「被踢」和「网络断」。
+    const kickedHits = buf.match(/.*(KickedOffLine|登录已失效).*/g);
+    const hits = kickedHits && kickedHits.length
+      ? kickedHits
+      : buf.match(/.*(账号状态变更为离线|正在重启 Worker).*/g);
     if (!hits || !hits.length) return '';
     const last = hits[hits.length - 1].trim();
     // 去掉时间戳和级别前缀，留「[KickedOffLine] [下线通知] …」这段人看得懂的
@@ -2070,22 +2099,26 @@ async function napcatHealOnce({ force = false } = {}) {
         healLog(`掉线：OneBot 不通（${st.processCount || 0} 个进程还活着）${healDown.why ? '，日志说：' + healDown.why : ''}`);
       }
       const down = Date.now() - healDown.since;
-      // 45 秒 / 5 分钟 / 15 分钟各救一次；再不行就判定需要人工扫码，不再反复折腾
-      const plan = [45e3, 5 * 60e3, 15 * 60e3];
-      if (healDown.restarts >= plan.length) {
-        if (!healState.needLogin) {
-          healState.needLogin = true;
-          healDown.why ||= '连着三次重启都没回来，可能要重新扫码';
-          const a = `掉线 ${Math.round(down / 1000)} 秒，重启三次都没回来，要重新扫码${healDown.why ? '｜' + healDown.why : ''}`;
-          actions.push(a); healLog(a);
-        }
-      } else if (down >= plan[healDown.restarts] && Date.now() - healDown.lastRestart > 30e3) {
+      // 被踢（KickedOffLine）：登录态已经作废，重启只会起来停在「等扫码」，还加重风控 → 直接叫人。
+      // 网络掉（日志里没有 KickedOffLine）：重启一次，值得一试。
+      const kicked = /KickedOffLine|登录已失效/.test(healDown.why);
+      if (!kicked && healDown.restarts < 1 && down >= 45e3 && Date.now() - healDown.lastRestart > 30e3) {
         await napcatHostRun(settings, 'stop').catch(() => null);
         await napcatHostRun(settings, 'start').catch(() => null);
         healDown.restarts += 1;
         healDown.lastRestart = Date.now();
-        const a = `掉线 ${Math.round(down / 1000)} 秒，已重启实例（第 ${healDown.restarts} 次）${healDown.why ? '｜' + healDown.why : ''}`;
+        const a = `掉线 ${Math.round(down / 1000)} 秒（像是网络断、不是被踢），已重启一次试试${healDown.why ? '｜' + healDown.why : ''}`;
         actions.push(a); healLog(a);
+      } else if ((kicked || healDown.restarts >= 1) && down >= (kicked ? 20e3 : 150e3)) {
+        healState.needLogin = true;
+        // 30 分钟才提醒一次，别把人烦死；提醒在本地弹窗，因为 QQ 通道这时候自己就是断的
+        if (Date.now() - healDown.lastNote > 30 * 60e3) {
+          healDown.lastNote = Date.now();
+          const qr = st.qrPath || 'D:\\NapCatDSL\\Shell\\cache\\qrcode.png';
+          const a = `${kicked ? '被踢下线' : '掉线'} ${Math.round(down / 1000)} 秒，需要人工扫码${healDown.why ? '｜' + healDown.why : ''}`;
+          actions.push(a); healLog(a);
+          toastLocal('QQ 掉线了，要扫码', `已经掉线 ${Math.round(down / 1000)} 秒${kicked ? '（被服务端踢下线）' : ''}。二维码：${qr}`);
+        }
       }
       healState.lastError = healDown.why || 'OneBot 不通（进程还在）';
       if (!actions.length) {
