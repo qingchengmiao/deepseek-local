@@ -332,7 +332,9 @@
 
   // 随包带的默认模型：现在留空 —— 开机就是原来的静态图，要点 L2D 自己选目录才会换。
   // 以后拿到定稿的三视图、用 PSD2Live 转好模型，把路径填回这里就会自动加载。
-  var DEFAULT_MODEL = '/assets/live2d/models/dsniang8c/dsniang8c.model3.json';
+  // 空 = 静态图模式：不装运行时、不建按钮、不挂模型。
+  // 要恢复 Live2D，把它填回 '/assets/live2d/models/<name>/<name>.model3.json'。
+  var DEFAULT_MODEL = '';
 
   function attach(model) {
     state.app.stage.removeChildren();
@@ -522,6 +524,8 @@
   function boot() {
     // 按钮不依赖 #mascot：有 body 就装得上。
     if (!document.body) return false;
+    // 静态模式：不建按钮、不加载运行时、不还原已存模型，吉祥物就是那张静态图。
+    if (!DEFAULT_MODEL) return true;
     ensureButton();
     ensureRuntime()
       .then(function () { markButton(); return restore(); })
