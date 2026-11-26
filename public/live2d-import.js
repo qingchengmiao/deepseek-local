@@ -288,8 +288,9 @@
     return { url: blobUrl(blob), settings: settings, missing: missing };
   }
 
-  // 随包带的默认模型（PSD2Live 从 drawpack\rig_sd_v6.psd 生成，见 tools 里的转换参数）
-  var DEFAULT_MODEL = '/assets/live2d/models/rig_sd_v6/rig_sd_v6.model3.json';
+  // 随包带的默认模型：现在留空 —— 开机就是原来的静态图，要点 L2D 自己选目录才会换。
+  // 以后拿到定稿的三视图、用 PSD2Live 转好模型，把路径填回这里就会自动加载。
+  var DEFAULT_MODEL = '';
 
   function attach(model) {
     state.app.stage.removeChildren();
@@ -318,7 +319,7 @@
 
   // 没导入过模型时，用同源自带的那个（服务器上真没有就安静地退回静态图）
   function mountDefault() {
-    if (state.model) return Promise.resolve(null);
+    if (!DEFAULT_MODEL || state.model) return Promise.resolve(null);
     return fetch(DEFAULT_MODEL, { method: 'HEAD' })
       .then(function (r) {
         if (!r.ok) return null;
