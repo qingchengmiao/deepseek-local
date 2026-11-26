@@ -84,7 +84,11 @@ export function qqStages(d) {
         try {
           for (const item of ctx.usable) {
             const atts = await qqImageAttachments(ctx.cfg, item);
-            conv.messages.push(newMessage('user', qqUserPrompt(item, { callName: ctx.settings.qqCallName || '对方' }), atts.length ? { attachments: atts } : {}));
+            // 会话里只存对方说的原话。【来自 QQ…】那种抬头是装配时才加的壳，
+            // 存进来只会让界面和模型的历史里全是括号机器话。
+            const extra = { relay: item };
+            if (atts.length) extra.attachments = atts;
+            conv.messages.push(newMessage('user', item.text || '', extra));
           }
           conv.updatedAt = now();
           await saveConversation(conv);
@@ -99,10 +103,10 @@ export function qqStages(d) {
       async run(ctx) {
         ctx.work = [];
         for (const item of ctx.usable) {
-          const ask = qqUserPrompt(item, { callName: ctx.settings.qqCallName || '对方' })
-            + '\n\n【这条回在手机上】像平时跟人聊天那样说话：一两段连着说完就行，别为了「分段」把一句话拆成好几行；真要分，最多两段，中间空一行。句末不加句号，别啰嗦。';
+          // 这里只备「对方说了什么」，不拼抬头也不拼指令——
+          // 抬头（来自谁、几点）和「像在手机上说话」的口吻都由 chatOnce/buildMessages 在装配时加。
           const atts = await qqImageAttachments(ctx.cfg, item);
-          ctx.work.push({ item, ask, atts });
+          ctx.work.push({ item, ask: String(item.text || ''), atts });
         }
       },
     },
@@ -114,7 +118,7 @@ export function qqStages(d) {
         ctx.conv = conv;
         for (const { item, ask, atts } of ctx.work) {
           try {
-            const res = await chatOnce(conv, ask, ctx.settings, { attachments: atts });
+            const res = await chatOnce(conv, ask, ctx.settings, { attachments: atts, relay: item, mobile: true });
             const parts = qqSemanticParts(res.answer, { maxParts: 3, paraMax: 140, lineMax: 90 });
             const ids = [];
             for (let i = 0; i < parts.length; i++) {

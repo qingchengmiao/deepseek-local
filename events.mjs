@@ -381,8 +381,19 @@ export function createEvents(deps) {
       if (!ev.at || ev.fired || ev.status === 'done') continue;
       if (t < ev.at - leadMin * 60e3) continue;
       if (t > ev.at + 6 * 3600e3) { ev.status = 'past'; continue; } // 六小时前的事别补发了
-      const when = ev.at > t + 60e3 ? `还有 ${Math.round((ev.at - t) / 60e3)} 分钟` : '到点了';
-      const text = `${ev.title} ${when}${ev.atText ? '（' + ev.atText.slice(11) + '）' : ''}${ev.note ? '，' + ev.note : ''}`;
+      // 发出去的话要像人说的：不带「标题 / 还有 N 分钟 / 到点了」这种播报拼装，
+      // 也不往括号里塞字段——那就是上一版被用户一眼看穿「带括号的机器话」的来源。
+      const mins = Math.round((ev.at - t) / 60e3);
+      const clock = ev.atText ? String(ev.atText).slice(11, 16) : '';
+      let text;
+      if (ev.at > t + 60e3) {
+        text = clock
+          ? `别忘了 ${clock} ${ev.title}，还剩 ${mins} 分钟`
+          : `别忘了 ${ev.title}，还有 ${mins} 分钟`;
+      } else {
+        text = clock ? `${clock} 了，${ev.title}，记着点` : `${ev.title}，到点了`;
+      }
+      if (ev.note) text += `。${ev.note}`;
       let id = null;
       try { id = await sendText(text); } catch (e) { log(`[事件] 发送失败：${e.message}`); continue; }
       ev.fired = true;
@@ -391,7 +402,7 @@ export function createEvents(deps) {
       sent.push({ id: ev.id, text, messageId: id });
       log(`[事件] 已提醒：${text}`);
       if (appendToConv && ev.convId) {
-        try { await appendToConv(ev.convId, `（提醒）${text}`); } catch { /* 记不进去不影响已发出的事 */ }
+        try { await appendToConv(ev.convId, text); } catch { /* 记不进去不影响已发出的事 */ }
       }
     }
     if (sent.length) await save();

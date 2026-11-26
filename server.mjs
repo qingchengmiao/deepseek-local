@@ -24,6 +24,7 @@ import { fileURLToPath } from 'node:url';
 import { spawn, execFile, execFileSync } from 'node:child_process';
 import { createPipeline, qqStages } from './qq-pipeline.mjs';
 import { createEvents } from './events.mjs';
+import { createDiary } from './diary.mjs';
 import { promisify } from 'node:util';
 import {
   CTX_DEFAULTS,
@@ -572,6 +573,8 @@ const DEFAULT_SETTINGS = {
   eventsAutoScan: true, // 每轮 QQ 对话结束后顺手抽一次
   eventsLeadMin: 10, // 提前几分钟提醒
   eventsSearch: true, // 允许联网查事件时间表（只查关键词，不发对话原文）
+  diaryEnabled: true, // 日程表 + 日志：没人说话时自己写一份给模型看的（data/model）
+  diaryIdleMin: 30, // 安静多少分钟后才允许写（太短会跟实时回复抢算力）
   // ---- 推送：允许应用主动往 QQ 推消息（一道权限门，关掉后推送接口一律 403）
   pushEnabled: true,
   pushUid: '', // 推给谁；空 = 回落到 qqUid
@@ -828,6 +831,8 @@ async function saveSettings(patch) {
     if (!(k in DEFAULT_SETTINGS)) continue;
     if (k === 'eventsEnabled' || k === 'eventsAutoScan' || k === 'eventsSearch') { next[k] = !!v; continue; }
     if (k === 'eventsLeadMin') { next[k] = Math.max(0, Math.min(1440, Math.floor(Number(v) || 0))); continue; }
+    if (k === 'diaryEnabled') { next[k] = !!v; continue; }
+    if (k === 'diaryIdleMin') { next[k] = Math.max(5, Math.min(1440, Math.floor(Number(v) || 0))); continue; }
     if (k === 'apiKey') next.apiKey = String(v || '').trim();
     else if (k === 'baseUrl') next.baseUrl = String(v || '').trim() || DEFAULT_SETTINGS.baseUrl;
     else if (k === 'temperature') next.temperature = Math.min(2, Math.max(0, Number(v) || 0));
@@ -1229,10 +1234,20 @@ async function qqSendText(text) {
 }
 
 /** 能跑一轮对话却不走 SSE 的最小实现（给 QQ 回话用） */
-async function chatOnce(conv, text, settings, { attachments = [] } = {}) {
+/** 最后一次有人说话的时间：日志只在「没人说话」的时候写 */
+let lastActivityAt = Date.now();
+
+async function chatOnce(conv, text, settings, { attachments = [], relay = null, mobile = false } = {}) {
   const apiKey = settings.apiKey || process.env.DEEPSEEK_API_KEY || '';
   if (!apiKey) throw new Error('没填 API Key，回不了话');
-  const userMessage = newMessage('user', text, attachments.length ? { attachments } : {});
+  lastActivityAt = Date.now();
+  // 消息里只存对方说的原话；「这条来自 QQ、几点、谁发的」是装配时才加的抬头，
+  // 不再写进会话——不然界面上、模型的历史里全是【来自 QQ…】【这条回在手机上】这种壳。
+  const extra = {};
+  if (attachments.length) extra.attachments = attachments;
+  if (relay) extra.relay = relay;
+  if (mobile) extra.mobile = true;
+  const userMessage = newMessage('user', text, extra);
   conv.messages.push(userMessage);
   if (conv.title === '新对话' || !conv.title) conv.title = autoTitle(text);
   await saveConversation(conv);
@@ -1524,6 +1539,48 @@ function stopEventsLoop() {
   eventsTimer = null;
 }
 
+// ---- 日程表 + 日志：写给模型自己看的那一份（data/model/calendar.md、data/model/journal/*.md）。
+// 只在「没人说话」的时候写，不抢实时回复的算力；装配上下文时把最近几天的带上（本体在 diary.mjs）。
+let diaryCache = null;
+function diaryApi() {
+  if (!diaryCache) {
+    diaryCache = createDiary({
+      dataDir: DATA,
+      log,
+      chat: async (system, user) => {
+        const settings = await loadSettings();
+        const r = await localChat(settings, { system, user, maxTokens: 700 });
+        return r.text;
+      },
+      settingsOf: () => loadSettings(),
+      // 原料：最近一段时间 QQ 会话里说过的话，原文，不做转述
+      recentText: async ({ hours = 24, maxChars = 6000 } = {}) => {
+        const settings = await loadSettings();
+        if (!settings.qqConvId) return '';
+        const conv = await loadConversation(settings.qqConvId).catch(() => null);
+        if (!conv) return '';
+        const since = Date.now() - Math.max(1, Number(hours) || 24) * 3600e3;
+        const lines = [];
+        for (const m of conv.messages || []) {
+          if (m.role !== 'user' && m.role !== 'assistant') continue;
+          const at = Number(m.createdAt) || 0;
+          if (at && at < since) continue;
+          const text = String(m.content || '').replace(/\s+/g, ' ').slice(0, 200);
+          if (text) lines.push(`${m.role === 'user' ? '对方' : '我'}：${text}`);
+        }
+        return lines.slice(-160).join('\n').slice(-maxChars);
+      },
+      lastActivityAt: () => lastActivityAt,
+      // 日程表的原料：事件库里还没到点、还没完成的事，代码自己排（模型只写日志）
+      upcoming: async () => (await eventsApi().list()) || [],
+    });
+  }
+  return diaryCache;
+}
+function startDiaryLoop() {
+  try { diaryApi().startLoop(5 * 60e3); } catch (e) { log('[日志] 空闲检查没起来：' + e.message); }
+}
+
 // ---- QQ 消息处理：一条消息从「收到」到「回完」被拆成有序阶段（qq-pipeline.mjs）。
 // 轮询和 WS 事件推送都走这条路，行为才一致；每个阶段的耗时记在返回值的 trace 里。
 let qqPipelineCache = null;
@@ -1590,7 +1647,9 @@ async function qqProcessItemsLegacy(list, { reply = true, settings, cfg } = {}) 
     try {
       for (const item of usable) {
         const atts = await qqImageAttachments(cfg, item);
-        conv.messages.push(newMessage('user', qqUserPrompt(item, { callName: settings.qqCallName || '对方' }), atts.length ? { attachments: atts } : {}));
+        const extra = { relay: item };
+        if (atts.length) extra.attachments = atts;
+        conv.messages.push(newMessage('user', String(item.text || ''), extra));
       }
       conv.updatedAt = now();
       await saveConversation(conv);
@@ -1601,10 +1660,8 @@ async function qqProcessItemsLegacy(list, { reply = true, settings, cfg } = {}) 
   // 但绝不去补答重启前的旧消息——那才是之前「一直发回答」的原因。
   for (const item of usable) {
     try {
-      const ask = qqUserPrompt(item, { callName: settings.qqCallName || '对方' })
-        + '\n\n【这条回在手机上】像平时跟人聊天那样说话：一两段连着说完就行，别为了「分段」把一句话拆成好几行；真要分，最多两段，中间空一行。句末不加句号，别啰嗦。';
       const atts = await qqImageAttachments(cfg, item);
-      const res = await chatOnce(conv, ask, settings, { attachments: atts });
+      const res = await chatOnce(conv, String(item.text || ''), settings, { attachments: atts, relay: item, mobile: true });
       // 一句一条地发，中间留点间隔，像人打字
       const parts = qqSemanticParts(res.answer, { maxParts: 3, paraMax: 140, lineMax: 90 });
       const ids = [];
@@ -4498,7 +4555,11 @@ async function buildMessages(conv, settings, { withTools = false } = {}) {
     styleParts.push(selfTuneText);
     meta.selfTune = { chars: selfTuneText.length };
   }
-  const systemPrompt = [...styleParts, settings.selfTune === false ? '' : TUNE_INSTRUCTION, ownPrompt].filter(Boolean).join('\n\n');
+  // 自己写的日程表和日志：不活跃时段攒下来的，装配时带上（有就带，没有就算了）
+  let diaryText = '';
+  try { diaryText = await diaryApi().readForPrompt({ days: 3, maxChars: 2600 }); } catch (e) { meta.warnings.push('日程表没读出来：' + e.message); }
+  if (diaryText) meta.diary = { chars: diaryText.length };
+  const systemPrompt = [...styleParts, settings.selfTune === false ? '' : TUNE_INSTRUCTION, diaryText, ownPrompt].filter(Boolean).join('\n\n');
   if (systemPrompt) out.push({ role: 'system', content: systemPrompt });
   if (style) meta.style = style;
 
@@ -4679,11 +4740,19 @@ async function buildMessages(conv, settings, { withTools = false } = {}) {
         }
         if (block) parts.push(block);
       }
+      // 装配时才套壳：对方在 QQ 上说的话才带「来自谁、几点」；要回在手机上才加口吻要求。
+      // 壳只出现在这一轮请求里，不落盘——界面上看到的就是对方说的原话。
+      let askText = trim.text;
+      if (m.relay) askText = qqUserPrompt(m.relay, { callName: settings.qqCallName || '对方' });
+      if (m.mobile) {
+        askText += '\n\n【这条回在手机上】像平时跟人聊天那样说话：一两段连着说完就行，'
+          + '别为了「分段」把一句话拆成好几行；真要分最多两段，中间空一行。句末不加句号，别啰嗦。';
+      }
       if (parts.length) {
-        parts.push({ type: 'text', text: trim.text });
+        parts.push({ type: 'text', text: askText });
         out.push({ role: 'user', content: parts });
       } else {
-        out.push({ role: 'user', content: trim.text });
+        out.push({ role: 'user', content: askText });
       }
     }
   }
@@ -6384,6 +6453,16 @@ async function handleApi(req, res, url) {
     if (handled) return sendJson(res, handled.status || 200, handled.json);
   }
 
+  // 日程表 + 日志（给自己看的那份）：看现状、手动催一次
+  if (pathname === '/api/diary' && method === 'GET') {
+    return sendJson(res, 200, await diaryApi().status());
+  }
+  if (pathname === '/api/diary/write' && method === 'POST') {
+    const body = (await readBody(req)) || {};
+    const r = await diaryApi().write({ force: body.force !== false, reason: String(body.reason || 'manual') });
+    return sendJson(res, 200, { ...r, status: await diaryApi().status() });
+  }
+
   // 推送：允许应用主动往 QQ 推一条（权限门 pushEnabled）
   if (pathname === '/api/push' && method === 'POST') {
     const body = await readBody(req) || {};
@@ -7155,6 +7234,7 @@ startQqEvents();
   startHealLoop(); // 隔离实例的自动纠错（90 秒一轮，设置里 napcatAutoHeal 可关）
   startLearnLoop(); // 群聊自学习：10 分钟抽一轮、跨周自动结算（设置里 learnAuto 可关）
   startEventsLoop(); // 事件提醒：30 秒一轮看有没有快到点的事（设置里 eventsEnabled 可关）
+  startDiaryLoop(); // 日程表 + 日志：每 5 分钟看一眼，安静够了才自己写（设置里 diaryEnabled 可关）
 startVectorLoop(); // 检索索引：启动 8 秒后后台建一次，之后每 5 分钟增量刷（只重算改过的会话）
 
   const shutdown = async () => {
