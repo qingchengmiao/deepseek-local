@@ -965,23 +965,43 @@ button.mini:hover { background: var(--hover); color: var(--text); }
 .qr-acts { display: flex; flex-wrap: wrap; gap: 6px; }
 .qr-acts .mini { white-space: nowrap; }
 
-/* 右下角吉祥物：聊天时露个头，开其他页面时让开（避开输入框，别压发送键） */
-.mascot { position: fixed; right: 12px; bottom: 132px; width: 112px; height: 112px; z-index: 45;
+/* 右下角吉祥物：钉在窗口真右下角（贴边，不跟对话栏走），开其他页面时让开 */
+.mascot { position: fixed; right: 18px; bottom: 18px; width: 176px; height: 176px; z-index: 45;
   cursor: pointer; user-select: none; transition: transform .18s ease, opacity .18s ease; }
 .mascot img { width: 100%; height: 100%; object-fit: contain; display: block;
-  filter: drop-shadow(0 8px 16px rgba(32, 44, 92, .16)); }
-.mascot:hover { transform: translateY(-4px) scale(1.04); }
-.mascot:active { transform: translateY(-1px) scale(.99); }
-.mascot.gone { opacity: 0; pointer-events: none; transform: translateY(8px); }
-.mascot-bubble { position: absolute; right: 96px; bottom: 74px; width: max-content; max-width: 240px;
+  filter: drop-shadow(0 10px 22px rgba(32, 44, 92, .2)); }
+.mascot:hover { transform: translateY(-6px) scale(1.05); }
+.mascot:active { transform: translateY(-2px) scale(.99); }
+.mascot.gone { opacity: 0; pointer-events: none; transform: translateY(10px); }
+/* 气泡往左开，贴在头侧，避免贴边后被裁 */
+.mascot-bubble { position: absolute; right: calc(100% - 6px); bottom: 46px; width: max-content; max-width: 300px;
   background: var(--bg); color: var(--text, #1f2430); border: 1px solid var(--border);
-  border-radius: 12px; padding: 9px 12px; font-size: 13px; line-height: 1.5;
-  box-shadow: 0 10px 26px rgba(30, 42, 80, .14); }
+  border-radius: 14px; padding: 11px 14px; font-size: 13.5px; line-height: 1.6;
+  box-shadow: 0 12px 30px rgba(30, 42, 80, .16); }
 .mascot-bubble::after { content: ''; position: absolute; right: -6px; bottom: 16px; width: 10px; height: 10px;
   background: inherit; border-right: 1px solid var(--border); border-bottom: 1px solid var(--border);
   transform: rotate(-45deg); }
-@media (max-width: 900px) { .mascot { width: 84px; height: 84px; right: 8px; bottom: 140px; } .mascot-bubble { right: 72px; max-width: 180px; } }
+/* 窗口不够宽时缩一点，免得压住发送键 */
+@media (max-width: 1100px) { .mascot { width: 148px; height: 148px; right: 12px; bottom: 12px; } .mascot-bubble { max-width: 240px; } }
+@media (max-width: 900px) { .mascot { width: 112px; height: 112px; right: 10px; bottom: 92px; } .mascot-bubble { max-width: 190px; bottom: 34px; } }
 @media (max-width: 640px) { .mascot { display: none; } }
+
+/* 吉祥物上的 Live2D 层：导入模型后盖住静态图，气泡和点击仍然可用 */
+.mascot .mascot-l2d { position: absolute; inset: 0; pointer-events: none; }
+.mascot .mascot-l2d canvas { display: block; }
+.mascot.l2d-on img { visibility: hidden; }
+.mascot.l2d-on:hover { transform: none; }
+.mascot-l2d-btn { position: absolute; left: 2px; bottom: 2px; z-index: 3; width: 34px; height: 22px;
+  padding: 0; font-size: 11px; line-height: 20px; border-radius: 6px; cursor: pointer;
+  color: #eaf2ff; background: rgba(20, 28, 46, .55); border: 1px solid rgba(150, 170, 200, .75);
+  opacity: .55; transition: opacity .15s ease, border-color .15s ease; }
+.mascot-l2d-btn:hover { opacity: 1; }
+.mascot-l2d-tip { position: fixed; left: 50%; bottom: 120px; transform: translateX(-50%) translateY(8px);
+  max-width: min(560px, 80vw); padding: 10px 14px; border-radius: 12px; font-size: 13px; line-height: 1.6;
+  background: rgba(18, 24, 40, .92); color: #eaf2ff; border: 1px solid rgba(120, 150, 220, .45);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, .28); opacity: 0; pointer-events: none;
+  transition: opacity .2s ease, transform .2s ease; z-index: 9999; }
+.mascot-l2d-tip.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 
 
 /* ---------------- GUI 统一优化层 ---------------- */

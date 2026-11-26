@@ -3577,10 +3577,24 @@ const VIEW_TITLES = {
 const MASCOT_LINES = [
   '这条对话存本机，不上云。',
   '长对话我会自己压摘要，别担心塞不下。',
-  '想让它更专注？把「上下文预算」调小一点。',
+  '想让我更专注？把「上下文预算」调小一点。',
   '日程写进日历，我每轮都会带上最近几天。',
   '带链接的问题，我会先自己打开念一遍。',
   '觉得我答得散，就把思考强度调到「最高」。',
+  '记不住的东西别硬记，跟我说一句，我落成事件。',
+  '随口提到的事我只记着，不响；要响得说「提醒我」。',
+  '你在打字的时候我不插嘴，安静下来才敢开口。',
+  '每天的日志我自己写，写完放进日程那页。',
+  '附件直接拖进来，图、PDF、音视频都能吃。',
+  '会话多了就搜，别在列表里翻。',
+  '上下文顶到上限会自己压，压过的还能翻回去。',
+  '换到别的页面我就让开，不挡你看东西。',
+  '模型换过好几轮，接口那栏写着现在用的是谁。',
+  '我答错了直接骂，不用给我留面子。',
+  '不喜欢我话多，就把这几句点过去。',
+  '夜里不想被打断，设置里能把提醒关掉。',
+  '日志写得不满意，可以让我重写一遍。',
+  '这机器的电费你出，我干活。',
 ];
 function initMascot() {
   const el = document.getElementById('mascot');
@@ -3588,13 +3602,27 @@ function initMascot() {
   const bubble = document.getElementById('mascotBubble');
   let i = Math.floor(Math.random() * MASCOT_LINES.length);
   let timer = null;
-  el.addEventListener('click', () => {
-    bubble.textContent = MASCOT_LINES[i % MASCOT_LINES.length];
-    i += 1;
+  let lastTouch = Date.now();
+  const bump = () => { lastTouch = Date.now(); };
+  ['mousemove', 'pointerdown', 'keydown', 'wheel'].forEach((ev) => window.addEventListener(ev, bump, { passive: true }));
+  const say = (text) => {
+    bubble.textContent = text;
     bubble.classList.remove('hidden');
     clearTimeout(timer);
-    timer = setTimeout(() => bubble.classList.add('hidden'), 4200);
+    timer = setTimeout(() => bubble.classList.add('hidden'), 5200);
+  };
+  el.addEventListener('click', () => {
+    say(MASCOT_LINES[i % MASCOT_LINES.length]);
+    i += 1;
   });
+  // 人离开一会儿才自己嘟囔一句，别打断打字
+  setInterval(() => {
+    if (S.view !== 'chat' || document.hidden) return;
+    if (Date.now() - lastTouch < 45000) return;
+    if (!bubble.classList.contains('hidden')) return;
+    say(MASCOT_LINES[i % MASCOT_LINES.length]);
+    i += 1;
+  }, 60000);
 }
 
 function setView(view) {
