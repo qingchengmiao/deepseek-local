@@ -1925,6 +1925,74 @@ async function napcatStatus(settings) {
   return { dir, exists, launcher, port: base.port, portOpen: open, qr, login };
 }
 
+// 强制要一张新码：NapCat 假在线时会回「QQ Is Logined」永不出码，restartNapcat 又会因为
+// loggedIn/httpUp 直接跳过不动它，所以这里绕过它，自己停宿主实例再拉起来，然后等磁盘上的码变。
+// 注意两件实测出来的事（2026-11-26 22:4x）：
+//  1) 新码落盘要 3～4 分钟（22:42:34 起实例、22:46:34 才出 qrcode.png），70 秒根本不够；
+//  2) 宿主的 start 会阻塞好几分钟（跑满 180 s 还在等），所以不能 await 它，否则轮询永远起不来。
+async function napcatForceNewQr(settings, { waitMs = 300000 } = {}) {
+  const out = { ok: false, forced: false, changed: false, waitedMs: 0, qr: null, error: '', napcat: null };
+  const t0 = Date.now();
+  const first = await napcatRefreshQr(settings, { waitMs: 4000 }).catch(e => ({ ok: false, error: e.message }));
+  out.napcat = (first && first.napcat) || null;
+  if (first && first.changed && first.qr) {
+    out.ok = true; out.changed = true; out.qr = first.qr;
+    out.waitedMs = Date.now() - t0;
+    return out;
+  }
+  const shell = isoShellDir(settings);
+  if (!shell) {
+    out.error = (first && first.error) || '没找到隔离实例目录，没法强制重启 NapCat';
+    out.qr = (first && first.qr) || null;
+    return out;
+  }
+  const before = await napcatHostState(settings).catch(() => null);
+  const beforeHash = (before && before.qr && before.qr.hash) || (first && first.qr && first.qr.hash) || '';
+  out.forced = true;
+  await napcatHostRun(settings, 'stop').catch(() => null);
+  // 停完再看一眼：老世代（11/24 起的 NapCatWinBootMain + QQ）有时会赖着不走，
+  // 它们留着就还是「已登录」，新实例起了也不出码 —— 再补一刀。
+  let afterStop = await napcatHostState(settings).catch(() => null);
+  if (afterStop && Array.isArray(afterStop.pids) && afterStop.pids.length) {
+    await new Promise(r => setTimeout(r, 2000));
+    await napcatHostRun(settings, 'stop').catch(() => null);
+    afterStop = await napcatHostState(settings).catch(() => null);
+  }
+  out.pidsAfterStop = (afterStop && afterStop.pids) || [];
+  // start 不能 await：它会阻塞几分钟，await 就等于永远不轮询
+  const exe = napcatHostExe(settings);
+  if (exe) {
+    try {
+      // 不加 detached：本机（Node + Windows）实测带 detached 时子进程 exit=0 但命令根本没执行；
+      // 只留 unref()，Windows 下父进程退出也不会带走它。
+      const child = spawn(exe, ['start', ...napcatHostArgs(settings)], { stdio: 'ignore', windowsHide: true });
+      child.unref();
+    } catch { /* 起不来就让下面的轮询去报错 */ }
+  }
+  let qr = null;
+  let st = null;
+  const deadline = t0 + Math.max(30000, Number(waitMs) || 0);
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 1500));
+    qr = await napcatQrOnly(settings).catch(() => null);
+    if (qr && qr.qr && qr.qr.hash && qr.qr.hash !== beforeHash) break;
+    qr = null;
+  }
+  if (qr && qr.qr) {
+    st = await napcatHostState(settings).catch(() => null);
+    out.ok = true; out.changed = true; out.qr = qr.qr;
+    out.qrWaitSec = Math.round((Date.now() - t0) / 1000);
+    out.waitedMs = Date.now() - t0;
+    if (st) out.loggedIn = !!st.loggedIn;
+    return out;
+  }
+  st = await napcatHostState(settings).catch(() => null);
+  out.waitedMs = Date.now() - t0;
+  out.error = '重启后等了 ' + Math.round(out.waitedMs / 1000) + ' 秒还没落新码（实测新码要 3～4 分钟）'
+    + (st && st.loggedIn ? '；而且它还报着已登录，等一分钟再点一次' : '；看看 NapCat 窗口是不是弹在别处，或者去 ' + (shell || '') + ' 里手动跑一次');
+  return out;
+}
+
 async function startNapcat(settings) {
   const dir = settings.qqNapCatDir || DEFAULT_SETTINGS.qqNapCatDir;
   const launcher = napcatLauncher(dir);
@@ -6419,6 +6487,14 @@ async function handleApi(req, res, url) {
       return sendJson(res, 200, await napcatRefreshQr(await loadSettings()));
     } catch (e) {
       return sendJson(res, 400, { ok: false, changed: false, error: e.message });
+    }
+  }
+
+  if (pathname === '/api/napcat/qr/force' && method === 'POST') {
+    try {
+      return sendJson(res, 200, await napcatForceNewQr(await loadSettings()));
+    } catch (e) {
+      return sendJson(res, 400, { ok: false, forced: false, error: e.message });
     }
   }
 
