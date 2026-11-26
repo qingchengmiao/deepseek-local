@@ -1930,6 +1930,32 @@ async function napcatStatus(settings) {
 // 注意两件实测出来的事（2026-11-26 22:4x）：
 //  1) 新码落盘要 3～4 分钟（22:42:34 起实例、22:46:34 才出 qrcode.png），70 秒根本不够；
 //  2) 宿主的 start 会阻塞好几分钟（跑满 180 s 还在等），所以不能 await 它，否则轮询永远起不来。
+// 清「NapCat 隔离实例那棵树」的残留：宿主本体、boot main，以及命令行里带 napcat 的 QQ。
+// 用户自己的 QQ（D:\Apps\QQ\QQ.exe，命令行里没有 napcat）一律不碰。
+async function napcatKillResidualTree() {
+  const ps = [
+    "$ErrorActionPreference='SilentlyContinue'",
+    "Get-CimInstance Win32_Process | Where-Object {",
+    "  ($_.Name -eq 'DSLNapCatHost.exe') -or ($_.Name -eq 'NapCatWinBootMain.exe') -or",
+    "  (($_.Name -eq 'QQ.exe') -and $_.CommandLine -and ($_.CommandLine -match 'NapCatDSL|napcat-host'))",
+    '} | ForEach-Object { [string]$_.ProcessId }',
+  ].join('\n');
+  const pids = await new Promise(resolve => {
+    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { timeout: 25000, windowsHide: true }, (err, stdout) => {
+      if (err) return resolve([]);
+      resolve(String(stdout || '').split(/\r?\n/).map(s => Number(String(s).trim())).filter(n => Number.isInteger(n) && n > 1));
+    });
+  });
+  const killed = [];
+  for (const pid of pids) {
+    try {
+      execFileSync('taskkill', ['/F', '/PID', String(pid)], { timeout: 8000, windowsHide: true, stdio: 'ignore' });
+      killed.push(pid);
+    } catch { /* 已经退了就算了 */ }
+  }
+  return killed;
+}
+
 async function napcatForceNewQr(settings, { waitMs = 300000 } = {}) {
   const out = { ok: false, forced: false, changed: false, waitedMs: 0, qr: null, error: '', napcat: null };
   const t0 = Date.now();
@@ -1959,6 +1985,14 @@ async function napcatForceNewQr(settings, { waitMs = 300000 } = {}) {
     afterStop = await napcatHostState(settings).catch(() => null);
   }
   out.pidsAfterStop = (afterStop && afterStop.pids) || [];
+  // 宿主的 stop 认不出「几天前起的旧世代」：实测 11/24 那棵 DSLNapCatHost + NapCatWinBootMain + 它拉起的 QQ
+  // 会一直活着占着 3200，于是永远回 QQ Is Logined、永不出码。这里按命令行精确清一遍再起。
+  try {
+    out.killedResidual = await napcatKillResidualTree();
+  } catch {
+    out.killedResidual = [];
+  }
+  if (out.killedResidual.length) await new Promise(r => setTimeout(r, 1500));
   // start 不能 await：它会阻塞几分钟，await 就等于永远不轮询
   const exe = napcatHostExe(settings);
   if (exe) {
