@@ -1978,6 +1978,37 @@ async function napcatRefreshQr(settings, { waitMs = 8000 } = {}) {
   return out;
 }
 
+// 真话探针：OneBot 说「已登录」不等于 QQ 账号在线。被 KickedOffLine 之后它照样报 login ok，
+// get_status 也照样 online:true（假在线），只有真去拉一次资料卡才会 130~250 ms 就 failed
+// （2026-11-26 22:30 实测：send_private_msg 回 1006514「网络连接异常」，get_status 却说一切正常）。
+// 底层抛出来的原文常是英文（AbortSignal 的 "The operation was aborted due to timeout"），
+// 这行字要直接显示在界面上，所以先换成能看懂的说法。
+function qqWhyText(raw) {
+  const m = String(raw == null ? '' : raw).trim() || 'OneBot 没应答';
+  if (/aborted|timed?\s*out|ETIMEDOUT|TimeoutError/i.test(m)) return 'OneBot 没应答（超时）';
+  if (/ECONNREFUSED|ENOTFOUND|fetch failed/i.test(m)) return '连不上 OneBot 端口';
+  if (/1006514|网络连接异常/.test(m)) return '网络连接异常（1006514）';
+  if (/coreInfo/.test(m)) return 'QQ 客户端连接已断';
+  return m.slice(0, 120);
+}
+
+async function napcatAccountOnline(settings) {
+  const cfg = effQqConfig(settings);
+  const t0 = Date.now();
+  const say = qqWhyText;
+  try {
+    const info = await loginInfo(cfg);
+    if (!info.ok) return { ok: false, why: say(info.error || 'OneBot 不通'), ms: Date.now() - t0 };
+    const uid = Number(info.uid) || 0;
+    if (!uid) return { ok: false, why: '拿不到自己的 QQ 号', ms: Date.now() - t0 };
+    const r = await onebot(cfg, 'get_stranger_info', { user_id: uid }, { timeoutMs: 5000 });
+    const d = r && r.data;
+    return { ok: !!d, uid: String(uid), nick: info.nick || '', why: d ? '' : '资料卡没返回，账号大概掉了', ms: Date.now() - t0 };
+  } catch (e) {
+    return { ok: false, why: say((e && e.message) || e), ms: Date.now() - t0 };
+  }
+}
+
 async function napcatStatus(settings) {
   const dir = settings.qqNapCatDir || DEFAULT_SETTINGS.qqNapCatDir;
   const exists = existsSync(dir);
@@ -2007,9 +2038,12 @@ async function napcatStatus(settings) {
   }
   let login = { ok: false };
   if (open) {
-    try { login = await loginInfo(effQqConfig(settings)); } catch (e) { login = { ok: false, error: e.message }; }
+    try { login = await loginInfo(effQqConfig(settings)); } catch (e) { login = { ok: false, error: qqWhyText((e && e.message) || e) }; }
   }
-  return { dir, exists, launcher, port: base.port, portOpen: open, qr, login };
+  // 账号真的在线吗（假在线时 login.ok 仍是 true，只有探针会说是掉线）
+  let account = { ok: false, why: open ? '' : 'OneBot 端口不通', ms: 0 };
+  if (open) { try { account = await napcatAccountOnline(settings); } catch (e) { account = { ok: false, why: String(e.message || e), ms: 0 }; } }
+  return { dir, exists, launcher, port: base.port, portOpen: open, qr, login, account };
 }
 
 // 强制要一张新码：NapCat 假在线时会回「QQ Is Logined」永不出码，restartNapcat 又会因为
@@ -2178,15 +2212,16 @@ function killPids(pids) {
 }
 
 // 手动的「出新的码」：杀掉旧 NapCat → 重跑启动器 → 等目录里出现新二维码（最多 60 秒）
-async function restartNapcat(settings) {
+async function restartNapcat(settings, { force = false } = {}) {
   const dir = settings.qqNapCatDir || DEFAULT_SETTINGS.qqNapCatDir;
   // Shell 副本：走宿主（stop + start）。已经登录的实例不硬杀——强杀会把登录 profile 写坏，
-  // 代价是要重新扫码，这个坑踩过两次了。
+  // 代价是要重新扫码，这个坑踩过两次了。例外：force=true（用户自己点的「重启出新码」），
+  // 那种情况下「已登录」往往是假的（账号被踢了，NapCat 还自称在线），不重启就永远出不了码。
   const shell = isoShellDir(settings);
   if (shell && (!napcatLauncher(dir) || shell === dir)) {
     const before = await napcatHostState(settings).catch(() => null);
     // 端口通 = 会话活着；这时去 stop 就等于把它杀了，代价是重新扫码。宁可不给码。
-    if (before && (before.loggedIn || before.httpUp)) {
+    if (!force && before && (before.loggedIn || before.httpUp)) {
       return {
         ok: true, via: 'host', shell,
         skipped: '实例活着（已登录 / OneBot 端口通），没动它。真要换号，先点「停止」再重新扫码。',
@@ -6589,11 +6624,17 @@ async function handleApi(req, res, url) {
 
   if (pathname === '/api/qq/test' && method === 'POST') {
     try {
-      const cfg = effQqConfig(await loadSettings());
+      const settings = await loadSettings();
+      const cfg = effQqConfig(settings);
       const info = await loginInfo(cfg);
       qqState.info = info;
-      return sendJson(res, 200, { ok: !!info.ok, info, baseUrl: cfg.baseUrl });
+      // OneBot 说登录着不算数：账号被踢之后它照样回 ok，必须再拿资料卡验一次真的通
+      const account = info.ok ? await napcatAccountOnline(settings) : { ok: false, why: qqWhyText(info.error || 'OneBot 不通'), ms: 0 };
+      const ok = !!(info.ok && account.ok);
+      if (!ok) evLog('qq', 'warn', '测试连接：实际不通', { info, account }).catch(() => {});
+      return sendJson(res, 200, { ok, info, account, baseUrl: cfg.baseUrl, error: ok ? '' : (account.why || '连不上') });
     } catch (e) {
+      evLog('qq', 'error', '测试连接：抛错了', e.message).catch(() => {});
       return sendJson(res, 400, { ok: false, error: e.message });
     }
   }
@@ -6660,8 +6701,10 @@ async function handleApi(req, res, url) {
 
   if (pathname === '/api/napcat/restart' && method === 'POST') {
     try {
-      const r = await restartNapcat(await loadSettings());
-      evLog('napcat', r && r.ok ? 'ok' : 'warn', r && r.skipped ? '重启 NapCat：没动它' : '重启 NapCat', r).catch(() => {});
+      const body = (await readBody(req)) || {};
+      const force = body.force === true;
+      const r = await restartNapcat(await loadSettings(), { force });
+      evLog('napcat', r && r.ok ? 'ok' : 'warn', r && r.skipped ? '重启 NapCat：没动它' : (force ? '重启 NapCat（强制）' : '重启 NapCat'), r).catch(() => {});
       return sendJson(res, 200, r);
     } catch (e) {
       evLog('napcat', 'error', '重启 NapCat：抛错了', e.message).catch(() => {});

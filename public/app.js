@@ -3572,7 +3572,8 @@ const QQW = { inited: false, ok: null, name: '', why: '', lostAt: 0, timer: 0, f
 
 async function qqAlive(nap) {
   const port = (nap && nap.port) || '3200';
-  const uid = Number((DAY.qq && DAY.qq.uid) || (nap && nap.login && nap.login.uid) || 0);
+  // 拿自己的号去查，别拿对方的：查对方等于「只要有网就成功」，查自己才反映账号在不在线
+  const uid = Number((nap && nap.login && nap.login.uid) || (DAY.qq && DAY.qq.me) || (DAY.qq && DAY.qq.uid) || 0);
   if (!uid) return { ok: true, why: '' };
   const ctl = new AbortController();
   const kill = setTimeout(() => ctl.abort(), 5000);
@@ -3606,8 +3607,14 @@ async function qqWatchTick() {
   const name = (nap.login && (nap.login.nick || nap.login.uid)) || QQW.name || 'QQ';
   let why = (nap.login && (nap.login.error || nap.login.message)) || (nap.ok === false ? nap.error : '') || '';
   let alive = login;
-  // 只有「NapCat 说登录着」才需要再确认；连续两轮没应答才算掉线，免得网络抖一下就误报
-  if (login) {
+  // 服务端已经替我们真连了一次 QQ 服务器（/api/napcat 的 account），它说不行就别再等第二轮
+  const acct = nap.account || null;
+  if (login && acct && acct.ok === false) {
+    alive = false;
+    why = String(acct.why || '账号连不上 QQ 服务器');
+    QQW.fail = 2;
+  } else if (login) {
+    // 只有「NapCat 说登录着」才需要再确认；连续两轮没应答才算掉线，免得网络抖一下就误报
     const probe = await qqAlive(nap);
     if (probe.ok) {
       QQW.fail = 0;
@@ -3998,19 +4005,29 @@ async function openQqPage() {
       return;
     }
     const bits = [];
+    const acct = st.account || null;
+    const acctDead = !!(acct && acct.ok === false);
     bits.push(st.running ? `<b style="color:var(--ok,#0a7)">实例在跑</b>（${esc(String(st.processCount || 0))} 个进程）` : '<b>没在跑</b>');
     bits.push(`端口 ${esc(String(st.httpPort || ''))}${st.httpUp ? ' 通' : ' 不通'}`);
-    if (st.loggedIn) bits.push(`<b style="color:var(--ok,#0a7)">已登录</b>`);
+    // 宿主说「已登录」不能信：账号被踢之后 NapCat 照样自称在线，得看真的连不连得上 QQ 服务器
+    if (acctDead) bits.push(`<b style="color:var(--warn,#c07)">实际掉线</b>${acct.why ? `：${esc(acct.why)}` : ''}`);
+    else if (st.loggedIn) bits.push(`<b style="color:var(--ok,#0a7)">已登录</b>`);
     else if (st.qrExists) bits.push('等扫码');
     if (st.shell) bits.push(`shell ${esc(st.shell)}`);
     if (st.login) bits.push(`登录目录 ${esc(st.login)}`);
     box.innerHTML = bits.join(' · ');
+    if (acctDead && st.loggedIn) {
+      box.innerHTML += `<div class="muted" style="margin-top:6px">宿主进程还在、也还说自己登录着，但发不出消息了 —— 点「强制出新码」重扫一次。</div>`;
+    }
     if (st.qr && st.qr.dataUrl && !st.loggedIn) {
       box.innerHTML += `<div class="qr-box" style="margin-top:10px"><img src="${st.qr.dataUrl}" alt="二维码" style="width:220px;height:220px;image-rendering:pixelated"><div class="muted">码会自己换，换了这里会跟着变（点「看二维码」再取一次）</div></div>`;
     }
   };
   const readNapHost = async () => {
     const st = await api('/api/napcat/host', { method: 'GET' }).catch(e => ({ ok: false, error: String(e.message || e) }));
+    // 宿主状态只说进程层面的事，「账号到底通不通」得看 /api/napcat 的 account
+    const nap = await api('/api/napcat', { method: 'GET' }).catch(() => null);
+    if (nap && nap.account) st.account = nap.account;
     paintNapHost(st);
     return st;
   };
@@ -4245,7 +4262,8 @@ async function openQqPage() {
         x.textContent = '重启中…（最多 60 秒）';
         toast('正在重启 NapCat，等它出一张新码…（会先断开当前登录）', 5000);
         try {
-          const r = await api('/api/napcat/restart', { method: 'POST', body: {} }).catch(e => ({ ok: false, error: String(e.message || e) }));
+          // force：用户点这个按钮就是明确要重启，别被「实例还活着」挡住（假在线时那才是唯一出路）
+          const r = await api('/api/napcat/restart', { method: 'POST', body: { force: true } }).catch(e => ({ ok: false, error: String(e.message || e) }));
           if (r.ok === false) { toast('重启失败：' + (r.error || '未知原因'), 4200); return; }
           const before = DAY.qrSeen ? DAY.qrSeen.hash : '';
           let swapped = false;
@@ -4263,9 +4281,11 @@ async function openQqPage() {
       }
       if (act === 'qqTest') {
         const r = await api('/api/qq/test', { method: 'POST', body: {} }).catch(e => ({ ok: false, error: String(e.message || e) }));
-        // /api/qq/test 只问 NapCat「你登录着吗」，假在线时它也回 ok，所以再真打一次服务器确认
+        // /api/qq/test 现在自己会真连一次服务器（account），它说不行就是不行；再兜一层前端探活
         const nap = await api('/api/napcat').catch(() => null);
-        const probe = nap ? await qqAlive(nap) : { ok: false, why: '拿不到 NapCat 状态' };
+        const probe = r.account && r.account.ok === false
+          ? { ok: false, why: r.account.why || r.error || '账号连不上 QQ 服务器' }
+          : (nap ? await qqAlive(nap) : { ok: false, why: '拿不到 NapCat 状态' });
         if (probe.ok) {
           toast(r.ok ? `连上了：${(nap && nap.login && nap.login.nick) || (r.info && r.info.nick) || ''}（${(nap && nap.login && nap.login.uid) || (r.info && r.info.uid) || ''}）` : `NapCat 说没连上：${r.error || ''}`, 4200);
         } else {
@@ -5227,13 +5247,17 @@ function qqLiveHtml() {
   const q = DAY.qq || {};
   const nap = DAY.napcat || {};
   const login = nap.login && nap.login.ok;
+  // NapCat 说登录着不等于账号在线：被踢之后它照样回 ok，得看 account（真连一次 QQ 服务器）
+  const acct = nap.account || null;
+  const acctDead = !!(acct && acct.ok === false);
   // QQW 记着「刚才还是登录状态，现在掉了」这件事——只有它知道是掉线还是从没登过
   // 注意：掉线时 NapCat 自己仍报 login.ok=true（假在线），所以这里不能带 !login 条件
   const dropped = QQW.ok === false && !!QQW.lostAt;
   const pill = dropped ? '<span class="pill warn">掉线了</span>'
-    : login ? '<span class="pill ok">已登录</span>'
-      : nap.portOpen ? '<span class="pill warn">端口通了，没登录</span>'
-        : nap.exists ? '<span class="pill off">NapCat 没起来</span>' : '<span class="pill off">没找到 NapCat</span>';
+    : acctDead ? `<span class="pill warn">实际掉线${acct.why ? '：' + esc(String(acct.why).slice(0, 40)) : ''}</span>`
+      : login ? '<span class="pill ok">已登录</span>'
+        : nap.portOpen ? '<span class="pill warn">端口通了，没登录</span>'
+          : nap.exists ? '<span class="pill off">NapCat 没起来</span>' : '<span class="pill off">没找到 NapCat</span>';
   const dropWarn = dropped
     ? `<div class="warn"><b>掉线了</b> · ${esc(new Date(QQW.lostAt).toLocaleTimeString('zh-CN'))}${QQW.why ? ' · ' + esc(QQW.why) : ''} —— 点下面「自动纠错」，没好就重扫一次</div>`
     : '';
