@@ -2037,11 +2037,11 @@ async function pushSend({ text, uid = '', group = '', kind = 'manual' } = {}) {
 //   2) 进程反复起不来、二维码一直不变（登录态被写坏）→ 把登录目录改名备份、建新的，标记需要重新扫码；
 //   3) 修完推一条 QQ 消息告诉人（如果那时候通道是通的）。
 // 不做的事：不去猜模型错误、不自动改 Key。
-const healState = { at: 0, rounds: 0, actions: [], needLogin: false, lastError: '', log: [] };
+const healState = { at: 0, rounds: 0, actions: [], needLogin: false, needCaptcha: '', lastError: '', log: [] };
 // 掉线计时：QQ 进程还在、但 OneBot 端口不通 —— 宿主 supervisor 对这种状态只等不救。
 // 2026-11-25 的教训：日志里 KickedOffLine = 服务端把登录态作废了，重启进程只会起来停在「等扫码」，
 // 救不回来还加重风控。所以被踢就只提醒人扫码；只有「没被踢、像网络断」才重启一次试试。
-const healDown = { since: 0, restarts: 0, lastRestart: 0, lastNote: 0, loginTried: false, why: '' };
+const healDown = { since: 0, restarts: 0, lastRestart: 0, lastNote: 0, lastLoginTry: 0, loginTries: 0, why: '' };
 
 function healLog(line) {
   const s = `[${new Date().toLocaleString('zh-CN', { hour12: false })}] ${line}`;
@@ -2243,7 +2243,9 @@ async function napcatAutoLogin(settings) {
       const r = await napcatWebuiCall(settings, 'PasswordLogin', { uin: saved.uin, passwordMd5: saved.passwordMd5 });
       if (r && r.code === 0 && await napcatWaitLogin(settings, 25000)) return { ok: true, how: '账号密码登录', uin: saved.uin };
       const d = (r && r.data) || {};
-      return { ok: false, uin, error: d.needCaptcha ? '要过滑块验证码' : (d.needNewDevice ? '新设备验证没过' : ((r && r.message) || '密码登录被拒')) };
+      // 要人过验证时把链接带出去：机器自己过不了，得让人在手机上点一下。
+      if (d.needCaptcha) return { ok: false, uin: saved.uin, needCaptcha: d.proofWaterUrl || '', error: '要过短信验证（点链接在手机上确认）' };
+      return { ok: false, uin: saved.uin, error: d.needNewDevice ? '新设备验证没过（要给新设备授权）' : ((r && r.message) || '密码登录被拒') };
     } catch (e) { return { ok: false, uin, error: e.message }; }
   }
   return { ok: false, uin, error: '快速登录没成功，也没存密码' };
@@ -2321,8 +2323,11 @@ async function napcatHealOnce({ force = false } = {}) {
       actions.push(a); healLog(a);
     }
     healState.needLogin = false;
+    healState.needCaptcha = '';
     healDown.since = 0;
     healDown.restarts = 0;
+    healDown.loginTries = 0;
+    healDown.lastLoginTry = 0;
     healDown.why = '';
   } else {
     const alive = (Number(st.processCount) || 0) > 0 || (Array.isArray(st.pids) && st.pids.length > 0);
@@ -2335,9 +2340,33 @@ async function napcatHealOnce({ force = false } = {}) {
         healLog(`掉线：OneBot 不通（${st.processCount || 0} 个进程还活着）${healDown.why ? '，日志说：' + healDown.why : ''}`);
       }
       const down = Date.now() - healDown.since;
-      // 被踢（KickedOffLine）：登录态已经作废，重启只会起来停在「等扫码」，还加重风控 → 直接叫人。
-      // 网络掉（日志里没有 KickedOffLine）：重启一次，值得一试。
       const kicked = /KickedOffLine|登录已失效/.test(healDown.why);
+      // 不管是「被踢下线」还是日志里只有「账号状态变更为离线」，登录态都可能已经作废，
+      // 所以两种都先自己试一次：快速登录（本地凭据）→ 存过的账密（MD5）。
+      // 11-26 那次只有「账号状态变更为离线」，旧代码只认 KickedOffLine，于是一整夜一次都没试，卡了 6 小时。
+      // 最多试两次、两次之间隔 60 秒（重启过之后进程是新的，值得再试一次），再多就是招风控。
+      if (healDown.loginTries < 2 && down >= 20e3 && Date.now() - healDown.lastLoginTry > 60e3) {
+        healDown.loginTries += 1;
+        healDown.lastLoginTry = Date.now();
+        const a = await napcatAutoLogin(settings).catch(e => ({ ok: false, error: e.message }));
+        if (a.ok) {
+          healDown.since = 0; healDown.restarts = 0; healDown.why = ''; healDown.loginTries = 0;
+          healState.needLogin = false;
+          const msg = `${kicked ? '被踢下线' : '掉线'}，已用${a.how}自动登回去（${a.uin}）`;
+          actions.push(msg); healLog(msg);
+          return { ok: true, actions, state: { ...healState, status: { running: st.running, loggedIn: st.loggedIn, fails: st.fails, phase: st.phase } } };
+        }
+        healState.needCaptcha = a.needCaptcha || '';
+        healLog(`${kicked ? '被踢下线' : '掉线'}，自动登录没成${a.error ? '：' + a.error : ''}`);
+        // 要人过验证就把链接推出去（本地弹窗，因为 QQ 通道这时候自己是断的）
+        if (a.needCaptcha && Date.now() - healDown.lastNote > 5 * 60e3) {
+          healDown.lastNote = Date.now();
+          const a2 = `掉线 ${Math.round(down / 1000)} 秒，密码登录要手机确认：${a.needCaptcha}`;
+          actions.push(a2); healLog(a2);
+          toastLocal('QQ 掉线了，要在手机上确认', `点开这个链接确认登录：${a.needCaptcha}`);
+        }
+      }
+      // 没被踢（多半是网络断）时重启一次，值得一试；被踢就重启没意义，只会停在等扫码。
       if (!kicked && healDown.restarts < 1 && down >= 45e3 && Date.now() - healDown.lastRestart > 30e3) {
         await napcatHostRun(settings, 'stop').catch(() => null);
         await napcatHostRun(settings, 'start').catch(() => null);
@@ -2345,24 +2374,13 @@ async function napcatHealOnce({ force = false } = {}) {
         healDown.lastRestart = Date.now();
         const a = `掉线 ${Math.round(down / 1000)} 秒（像是网络断、不是被踢），已重启一次试试${healDown.why ? '｜' + healDown.why : ''}`;
         actions.push(a); healLog(a);
-      } else if ((kicked || healDown.restarts >= 1) && down >= (kicked ? 20e3 : 150e3)) {
-        // 被踢之后先自己登一次：快速登录（本地有凭据）→ 存过的账密（MD5）。都不成才叫人扫码。
-        if (kicked && !healDown.loginTried) {
-          healDown.loginTried = true;
-          const a = await napcatAutoLogin(settings).catch(e => ({ ok: false, error: e.message }));
-          if (a.ok) {
-            healDown.since = 0; healDown.restarts = 0; healDown.why = ''; healDown.loginTried = false;
-            healState.needLogin = false;
-            const msg = `被踢下线，已用${a.how}自动登回去（${a.uin}）`;
-            actions.push(msg); healLog(msg);
-            return { ok: true, actions, state: { ...healState, status: { running: st.running, loggedIn: st.loggedIn, fails: st.fails, phase: st.phase } } };
-          }
-          healLog(`被踢下线，自动登录没成${a.error ? '：' + a.error : ''}`);
-        }
+      } else if ((kicked || healDown.restarts >= 1) && down >= (kicked ? 60e3 : 150e3)) {
         healState.needLogin = true;
         // 30 分钟才提醒一次，别把人烦死；提醒在本地弹窗，因为 QQ 通道这时候自己就是断的
         if (Date.now() - healDown.lastNote > 30 * 60e3) {
           healDown.lastNote = Date.now();
+          // 先把码换成新的再叫人：cache\qrcode.png 上的旧码可能两分钟前就失效了。
+          await napcatWebuiCall(settings, 'RefreshQRcode').catch(() => null);
           const qr = st.qrPath || 'D:\\NapCatDSL\\Shell\\cache\\qrcode.png';
           const a = `${kicked ? '被踢下线' : '掉线'} ${Math.round(down / 1000)} 秒，需要人工扫码${healDown.why ? '｜' + healDown.why : ''}`;
           actions.push(a); healLog(a);
