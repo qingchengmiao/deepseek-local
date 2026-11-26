@@ -3561,6 +3561,54 @@ function tickClockMini() {
 setInterval(tickClockMini, 15000);
 setInterval(syncTail, 2000);
 
+/* ---------------------------------------------------- 全局盯 QQ 登录态
+ * 之前只有「QQ 通道」那一页会去看 NapCat 的登录态，而且只是每 120 秒顺手读一次：
+ * QQ 被踢下线时人在别的页面，就什么提示都看不到。这里改成不管在哪一页都盯。 */
+const QQW = { inited: false, ok: null, name: '', why: '', lostAt: 0, timer: 0 };
+
+async function qqWatchTick() {
+  const nap = await api('/api/napcat').catch(() => null);
+  if (!nap) return null;
+  const login = !!(nap.login && nap.login.ok);
+  const name = (nap.login && (nap.login.nick || nap.login.uid)) || QQW.name || 'QQ';
+  const why = (nap.login && (nap.login.error || nap.login.message)) || (nap.ok === false ? nap.error : '') || '';
+  if (!QQW.inited) {
+    QQW.inited = true;
+    QQW.ok = login;
+    QQW.name = login ? name : '';
+    return nap;
+  }
+  if (QQW.ok && !login) {
+    QQW.ok = false;
+    QQW.why = why;
+    QQW.lostAt = Date.now();
+    const msg = `${name} 掉线了${why ? '：' + why : ''} —— 去「QQ 通道」点「自动纠错」，没好就重扫`;
+    toast(msg, 9000);
+    try {
+      if ('Notification' in window && Notification.permission === 'granted') {
+        new Notification('QQ 掉线了', { body: (name + (why ? ' · ' + why : '')) + ' —— 打开「QQ 通道」处理', tag: 'qq-offline' });
+      }
+    } catch { /* 通知失败不影响主流程 */ }
+    if (S.view === 'qq' && typeof DAY.qqRepaint === 'function') DAY.qqRepaint();
+  } else if (!QQW.ok && login) {
+    QQW.ok = true;
+    QQW.name = name;
+    QQW.why = '';
+    QQW.lostAt = 0;
+    toast(`${name} 回来了`);
+    if (S.view === 'qq' && typeof DAY.qqRepaint === 'function') DAY.qqRepaint();
+  } else if (login) {
+    QQW.name = name;
+  }
+  return nap;
+}
+
+function startQqWatch() {
+  if (QQW.timer) return;
+  setTimeout(() => { qqWatchTick(); }, 2500);
+  QQW.timer = setInterval(() => { qqWatchTick(); }, 15000);
+}
+
 async function loadCalendarState() {
   DAY.cal = await api('/api/calendar');
   if (!DAY.selected) DAY.selected = DAY.cal.today;
@@ -3787,6 +3835,8 @@ async function openQqPage() {
   DAY.qrAutoMs = QR_AUTO_SEC * 1000;
   DAY.qrSeen = null;
   DAY.qrNextAt = 0;
+  // 全局看门狗发现掉线时，用它把这一页刷成新状态（人正好停在这页的时候）
+  DAY.qqRepaint = () => paintShell();
   const load = async () => {
     DAY.qq = await api('/api/qq/state').catch(() => ({}));
     DAY.napcat = await api('/api/napcat').catch(() => ({}));
@@ -4904,9 +4954,15 @@ function qqLiveHtml() {
   const q = DAY.qq || {};
   const nap = DAY.napcat || {};
   const login = nap.login && nap.login.ok;
+  // QQW 记着「刚才还是登录状态，现在掉了」这件事——只有它知道是掉线还是从没登过
+  const dropped = !login && QQW.ok === false && !!QQW.lostAt;
   const pill = login ? '<span class="pill ok">已登录</span>'
-    : nap.portOpen ? '<span class="pill warn">端口通了，没登录</span>'
-      : nap.exists ? '<span class="pill off">NapCat 没起来</span>' : '<span class="pill off">没找到 NapCat</span>';
+    : dropped ? '<span class="pill warn">掉线了</span>'
+      : nap.portOpen ? '<span class="pill warn">端口通了，没登录</span>'
+        : nap.exists ? '<span class="pill off">NapCat 没起来</span>' : '<span class="pill off">没找到 NapCat</span>';
+  const dropWarn = dropped
+    ? `<div class="warn"><b>掉线了</b> · ${esc(new Date(QQW.lostAt).toLocaleTimeString('zh-CN'))}${QQW.why ? ' · ' + esc(QQW.why) : ''} —— 点下面「自动纠错」，没好就重扫一次</div>`
+    : '';
   const recent = (q.recent || []).slice().reverse().slice(0, 12).map(r => `
     <div class="qq-line2 ${r.dir || ''}">
       <span class="dir">${r.dir === 'in' ? '收' : r.dir === 'out' ? '发' : '!'}</span>
@@ -4953,6 +5009,7 @@ function qqLiveHtml() {
           <span>轮询</span><span>${(q.mode || 'off') === 'off' ? '关着（选「只发」或「收发」才开始）' : q.started ? '进行中' : '没在轮询'}${q.lastPollAt ? ' · 上次 ' + new Date(q.lastPollAt).toLocaleTimeString('zh-CN') : ''}</span>
           <span>记账</span><span>收到 ${q.received || 0} · 发出 ${q.sent || 0} · 已见 ${q.seen || 0}</span>
         </div>
+        ${dropWarn}
         ${q.lastError ? `<div class="warn">${esc(q.lastError)}</div>` : ''}
         <div class="qq-acts" style="margin-top:10px">
           <button class="mini" data-x="qqTest">测试连接</button>
@@ -5413,6 +5470,7 @@ function initClockButton() {
 }
 
 initClockButton();
+startQqWatch();
 initMascot();
 initDropZone();
 initSelectionCopy();
