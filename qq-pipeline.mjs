@@ -50,14 +50,27 @@ export function qqStages(d) {
       name: 'dedupe',
       async run(ctx) {
         const { fresh, seen } = pickNew(ctx.list, state.seen);
-        if (seen.length !== state.seen.length) {
+        // ★ 这里原来写的是「长度变了才落盘」。seen 到 300 上限之后，进来一条也还是 300，
+        //   于是那个 id 永远进不了 seen —— 同一条消息每轮都被当成新的，客户端无限复读、QQ 那头被刷屏。
+        //   判据只能是「这一轮确实有新的」，不能再靠长度。
+        const changed = fresh.length > 0 || seen.length !== state.seen.length;
+        if (changed) {
           state.seen = seen;
           await saveQqSeen();
         }
         state.lastPollAt = now();
         state.lastPollMs = state.lastPollAt - ctx.t0;
-        ctx.freshList = fresh;
-        ctx.usable = fresh.filter(item => item.text || (item.images && item.images.length));
+        // 只回「刚说的」：历史接口会把最近的旧消息一起带回来，超过 3 分钟的一律只记账、不回，
+        // 免得重启 / 重连之后对着几分钟前的旧话连发一串回答。
+        const t = now();
+        const AGE_MS = 3 * 60e3;
+        const usableFresh = fresh.filter(item => {
+          const at = Number(item.time) || 0;
+          return !at || t - at <= AGE_MS;
+        });
+        ctx.staleSkipped = fresh.length - usableFresh.length;
+        ctx.freshList = usableFresh;
+        ctx.usable = usableFresh.filter(item => item.text || (item.images && item.images.length));
         ctx.usableText = ctx.usable.slice(); // 阶段之间不改同一个数组
       },
     },
