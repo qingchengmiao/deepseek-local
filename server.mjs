@@ -572,6 +572,7 @@ const DEFAULT_SETTINGS = {
   eventsEnabled: true, // 总开关
   eventsAutoScan: true, // 每轮 QQ 对话结束后顺手抽一次
   eventsLeadMin: 10, // 提前几分钟提醒
+  eventsQuietMin: 10, // 人安静这么多分钟之后才提醒（正在聊天时不插嘴）
   eventsSearch: true, // 允许联网查事件时间表（只查关键词，不发对话原文）
   diaryEnabled: true, // 日程表 + 日志：没人说话时自己写一份给模型看的（data/model）
   diaryIdleMin: 30, // 安静多少分钟后才允许写（太短会跟实时回复抢算力）
@@ -832,6 +833,7 @@ async function saveSettings(patch) {
     if (!(k in DEFAULT_SETTINGS)) continue;
     if (k === 'eventsEnabled' || k === 'eventsAutoScan' || k === 'eventsSearch') { next[k] = !!v; continue; }
     if (k === 'eventsLeadMin') { next[k] = Math.max(0, Math.min(1440, Math.floor(Number(v) || 0))); continue; }
+    if (k === 'eventsQuietMin') { next[k] = Math.max(0, Math.min(1440, Math.floor(Number(v) || 0))); continue; }
     if (k === 'diaryEnabled') { next[k] = !!v; continue; }
     if (k === 'diaryIdleMin') { next[k] = Math.max(5, Math.min(1440, Math.floor(Number(v) || 0))); continue; }
     if (k === 'diaryEngine') { next[k] = String(v) === 'local' ? 'local' : 'api'; continue; }
@@ -1237,7 +1239,8 @@ async function qqSendText(text) {
 
 /** 能跑一轮对话却不走 SSE 的最小实现（给 QQ 回话用） */
 /** 最后一次有人说话的时间：日志只在「没人说话」的时候写 */
-let lastActivityAt = Date.now();
+// 最后一次有人说话的时间（0 = 还没人说过；别拿开机时间当「刚聊过」，否则一重启就静默十分钟）
+let lastActivityAt = 0;
 
 async function chatOnce(conv, text, settings, { attachments = [], relay = null, mobile = false } = {}) {
   const apiKey = settings.apiKey || process.env.DEEPSEEK_API_KEY || '';
@@ -1491,14 +1494,8 @@ function eventsApi() {
         return { text: r.text };
       },
       sendText: (text) => qqSendText(text),
-      appendToConv: async (convId, text) => {
-        if (!convId) return;
-        const conv = await loadConversation(convId).catch(() => null);
-        if (!conv) return;
-        conv.messages.push(newMessage('assistant', text));
-        conv.updatedAt = now();
-        await saveConversation(conv);
-      },
+      // 最后一次有人说话的时间：人在聊的时候先不插嘴，等她安静下来再提醒
+      lastActivityAt: () => lastActivityAt,
       convText: async (convId, { limit = 40 } = {}) => {
         const conv = await loadConversation(convId).catch(() => null);
         if (!conv) return '';
@@ -4393,7 +4390,12 @@ async function buildMessages(conv, settings, { withTools = false } = {}) {
   const halfLife = clampNum(settings.ctxHalfLifeDays, 0.5, 3650, CTX_DEFAULTS.ctxHalfLifeDays);
   const trimChars = clampNum(settings.ctxTrimChars, 60, 8000, CTX_DEFAULTS.ctxTrimChars);
 
-  let history = conv.messages.filter(m => (m.role === 'user' || m.role === 'assistant'));
+  // 旧版提醒被当成「我自己说过的话」存进了会话：组装上下文时滤掉。
+  // 磁盘上的记录不删，只是不再喂给模型，免得它学那种播报腔。
+  const OLD_REMINDER = /^(（提醒）|别忘了\s*\d{1,2}:\d{2}|到点了|还有\s*\d+\s*分钟|还有\s*\d+\s*min)/;
+  let history = conv.messages.filter(m => (m.role === 'user' || m.role === 'assistant')
+    && m.hidden !== true
+    && !(m.role === 'assistant' && OLD_REMINDER.test(String(m.content || ''))));
   const maxHist = Number(settings.maxHistoryMessages) || 0;
   if (maxHist > 0 && history.length > maxHist) {
     history = history.slice(-maxHist);

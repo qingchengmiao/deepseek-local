@@ -186,8 +186,9 @@ export function createEvents(deps) {
     dataDir,
     askModel,
     sendText,
-    appendToConv = null,
     convText = null,
+    // 最后一次有人说话的时间：人还在聊的时候先别插嘴
+    lastActivityAt = null,
     settingsOf = async () => ({}),
     log = () => {},
   } = deps;
@@ -221,6 +222,8 @@ export function createEvents(deps) {
       at,
       atText: at ? fmtLocal(new Date(at)) : '',
       note: String(raw.note || '').slice(0, 200),
+      // 上不上闹钟：聊天里随口提到的事默认只记不响，只有明确让人提醒的才算真事
+      armed: raw.armed !== false,
       source: raw.source || meta.source || 'chat',
       convId: raw.convId || meta.convId || '',
       status: raw.status || (at && at < Date.now() ? 'past' : 'open'),
@@ -289,6 +292,9 @@ export function createEvents(deps) {
     const parsed = pickJson(out && out.text);
     const arr = (parsed && Array.isArray(parsed.events)) ? parsed.events : [];
     const st = await settingsOf().catch(() => ({}));
+    // 只有明确让人「提醒我」的才上闹钟；随口说一句「明天下午三点碰面」只记下来，不响
+    const WANTS_REMIND = /提醒我|提醒一下|叫我一声|记得提醒|别忘了|别忘|到点提醒|到时候提醒/;
+    const armed = WANTS_REMIND.test(src);
     const added = [];
     for (const e of arr.slice(0, 5)) {
       if (!e || !e.title) continue;
@@ -309,7 +315,7 @@ export function createEvents(deps) {
       let note = String(e.note || '').trim().slice(0, 200);
       if (NOTE_TEMPLATE.test(note)) note = ''; // 模型抄了示例里的占位句
       let ev;
-      try { ev = await add({ title: e.title, at, note, source: 'chat' }, meta); } catch { continue; }
+      try { ev = await add({ title: e.title, at, note, source: 'chat', armed }, meta); } catch { continue; }
       // 没说几点（抽出来是 00:00）就去网上看看有没有更准的时间表；查不到就算了，绝不编
       if (st.eventsSearch !== false && !ev.lookup && / 00:00$/.test(ev.atText)) {
         try {
@@ -377,10 +383,21 @@ export function createEvents(deps) {
     const c = await load();
     const t = Date.now();
     const sent = [];
+    const lastAct = typeof lastActivityAt === 'function' ? Number(lastActivityAt()) || 0 : 0;
+    const quietMin = Math.max(0, Math.min(24 * 60, Number(settings.eventsQuietMin ?? 10)));
+    // 人还在说话的时候别插嘴：等她安静下来再把攒着的提醒说出去
+    const humanBusy = !!lastAct && t - lastAct < quietMin * 60e3;
     for (const ev of c.events) {
       if (!ev.at || ev.fired || ev.status === 'done') continue;
+      // 只对「明确让人提醒」的事上闹钟：聊天里随口提到的事只记下来、不响
+      if (ev.armed === false) {
+        if (t > ev.at + 30 * 60e3) ev.status = 'past';
+        continue;
+      }
       if (t < ev.at - leadMin * 60e3) continue;
-      if (t > ev.at + 6 * 3600e3) { ev.status = 'past'; continue; } // 六小时前的事别补发了
+      // 迟到超过半小时就别补发了：晚到的提醒比不提醒更烦人
+      if (t > ev.at + 30 * 60e3) { ev.status = 'past'; continue; }
+      if (humanBusy) continue;
       // 发出去的话要像人说的：不带「标题 / 还有 N 分钟 / 到点了」这种播报拼装，
       // 也不往括号里塞字段——那就是上一版被用户一眼看穿「带括号的机器话」的来源。
       const mins = Math.round((ev.at - t) / 60e3);
@@ -401,9 +418,8 @@ export function createEvents(deps) {
       ev.status = 'fired';
       sent.push({ id: ev.id, text, messageId: id });
       log(`[事件] 已提醒：${text}`);
-      if (appendToConv && ev.convId) {
-        try { await appendToConv(ev.convId, text); } catch { /* 记不进去不影响已发出的事 */ }
-      }
+      // 提醒只发出去，不往会话里写：写进会话就成了「我自己说的话」，
+      // 模型下一轮会把它当上下文，人也能在聊天记录里看到一堆机器腔的播报。
     }
     if (sent.length) await save();
     else if (c.events.some(e => e.status === 'past')) await save();
