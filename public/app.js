@@ -3770,7 +3770,11 @@ async function openQqPage() {
     el.textContent = `${String(Math.floor(left / 60)).padStart(2, '0')}:${String(left % 60).padStart(2, '0')}`;
   };
   // 只读二维码（轻接口），图变了才换 <img src>，顺手把登录态也核对一遍
+  // manual=true 时先真去敲一次 NapCat（POST /api/napcat/qr/refresh，最多等十来秒）——只读接口永远不会出新码
   const refreshQr = async (manual = false) => {
+    const forced = manual
+      ? await api('/api/napcat/qr/refresh', { method: 'POST', body: {} }).catch(e => ({ ok: false, error: String(e.message || e) }))
+      : null;
     const r = await api('/api/napcat/qr').catch(() => null);
     DAY.qrNextAt = Date.now() + DAY.qrAutoMs;
     if (!r) { if (manual) toast('读二维码失败'); return; }
@@ -3796,10 +3800,11 @@ async function openQqPage() {
     }
     if (!img && (next || manual)) await paintShell(); // 之前没码，现在有码 / 手动刷新时结构变了就重画
     if (manual) {
-      if (!next) toast('NapCat 还没出码：先点「启动 NapCat」');
-      else if (changed) toast('换了张新码，扫这个');
-      else if (!next.fresh) toast(`还是同一张码（${qrAgeText(next.mtime)}的）：NapCat 没在出新的，点「重启 NapCat 出新码」`, 4200);
-      else toast('还是同一张码（这张是新的，NapCat 还没重新出码）');
+      const why = (forced && forced.error) || '';
+      if (!next) toast(why || 'NapCat 还没出码：先点「启动 NapCat」', why ? 5600 : 3200);
+      else if (changed) toast('新码出来了，扫这个');
+      else if (why) toast('没换新码：' + why, 5600);
+      else toast(`还是同一张码（${qrAgeText(next.mtime)}的），NapCat 没给新的；真要换号点「重启 NapCat 出新码」`, 5200);
     }
     // 顺手核对登录态：登录上了就把卡片换成账号
     const st = await api('/api/qq/state').catch(() => null);
@@ -4069,7 +4074,7 @@ async function openQqPage() {
       if (act === 'napRefresh') {
         x.disabled = true;
         const oldLabel = x.textContent;
-        x.textContent = '读取中…';
+        x.textContent = '刷新中…（最多十几秒）';
         try { await refreshQr(true); } finally { x.disabled = false; x.textContent = oldLabel; }
         return;
       }

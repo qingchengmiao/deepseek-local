@@ -1827,6 +1827,70 @@ async function napcatQrOnly(settings) {
   }
 }
 
+/** 真去敲 NapCat 要一张新码，并等它落盘。
+ * 光读 /api/napcat/qr 是永远拿不到新码的（那个只读磁盘上的 png），必须打到 WebUI 的 RefreshQRcode。
+ * NapCat 那边：已登录会拒绝；正在重连会返回 {restarting:true} 且不出码 —— 这些都要原样带回来，别吞。
+ */
+async function napcatRefreshQr(settings, { waitMs = 8000 } = {}) {
+  const before = await napcatQrOnly(settings);
+  const beforeHash = (before.qr && before.qr.hash) || '';
+  const port = Number(settings.napcatWebuiPort) || 6209;
+  const out = {
+    ok: false, changed: false, beforeHash, waitedMs: 0,
+    napcat: null, error: '', qr: null, dir: before.dir, exists: before.exists,
+  };
+
+  if (!(await portOpen('127.0.0.1', port))) {
+    out.error = `NapCat 没在跑（WebUI ${port} 不通），先点「启动 NapCat」`;
+    out.qr = before.qr || null;
+    return out;
+  }
+
+  let r = null;
+  let definitive = false; // 明确不出码（已登录 / 正在重连）：不用再等落盘
+  try {
+    r = await napcatWebuiCall(settings, 'RefreshQRcode');
+  } catch (e) {
+    out.error = 'NapCat WebUI 打不通：' + e.message;
+  }
+  if (r) {
+    out.napcat = r;
+    if (r.code !== 0) {
+      const msg = String(r.message || '');
+      // 常见几种：QQ Is Logined（已登录）/ QRCode Refresh Error / 二维码刷新超时
+      if (/log\s*in/i.test(msg)) {
+        out.error = `QQ 还登录着（NapCat 原话：${msg || 'QQ Is Logined'}），登录状态下它不出新码；要换号得先停掉 NapCat 再启动`;
+        definitive = true;
+      } else out.error = msg || `NapCat 拒绝刷新（code ${r.code}）`;
+    } else if (r.data && r.data.restarting) {
+      out.error = 'NapCat 正在重连 QQ，这会儿不出码，等它重连完再看';
+      definitive = true;
+    }
+  }
+
+  // 不管 WebUI 怎么答，最终以「磁盘上的码换没换」为准
+  const t0 = Date.now();
+  const deadline = t0 + Math.max(1500, Number(waitMs) || 0);
+  let cur = before;
+  while (!definitive && Date.now() < deadline) {
+    await new Promise(res => setTimeout(res, 600));
+    cur = await napcatQrOnly(settings);
+    const h = (cur.qr && cur.qr.hash) || '';
+    if (h && h !== beforeHash) { markQrSeen(h); out.changed = true; break; }
+  }
+  out.waitedMs = Date.now() - t0;
+  out.qr = cur.qr || null;
+  out.dir = cur.dir;
+  out.exists = cur.exists;
+  out.ok = out.changed;
+  if (!out.changed) {
+    out.error = out.error || (out.qr
+      ? `NapCat 收到了请求，但 ${Math.round(out.waitedMs / 1000)} 秒内没落新码（这张码是 ${new Date(out.qr.mtime).toLocaleTimeString('zh-CN')} 的）`
+      : 'NapCat 没出码：先在 QQ 页点「启动 NapCat」');
+  }
+  return out;
+}
+
 async function napcatStatus(settings) {
   const dir = settings.qqNapCatDir || DEFAULT_SETTINGS.qqNapCatDir;
   const exists = existsSync(dir);
@@ -6347,6 +6411,15 @@ async function handleApi(req, res, url) {
 
   if (pathname === '/api/napcat/qr' && method === 'GET') {
     return sendJson(res, 200, await napcatQrOnly(await loadSettings()));
+  }
+
+  // 「刷新二维码」按钮的正面：真敲 NapCat 换一张码（GET /api/napcat/qr 只读磁盘，点了永远不会变）
+  if (pathname === '/api/napcat/qr/refresh' && method === 'POST') {
+    try {
+      return sendJson(res, 200, await napcatRefreshQr(await loadSettings()));
+    } catch (e) {
+      return sendJson(res, 400, { ok: false, changed: false, error: e.message });
+    }
   }
 
   if (pathname === '/api/napcat/restart' && method === 'POST') {
