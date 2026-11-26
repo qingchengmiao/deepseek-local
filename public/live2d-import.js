@@ -288,23 +288,47 @@
     return { url: blobUrl(blob), settings: settings, missing: missing };
   }
 
-  function mount(built) {
+  // 随包带的默认模型（PSD2Live 从 drawpack\rig_sd_v6.psd 生成，见 tools 里的转换参数）
+  var DEFAULT_MODEL = '/assets/live2d/models/rig_sd_v6/rig_sd_v6.model3.json';
+
+  function attach(model) {
+    state.app.stage.removeChildren();
+    state.app.stage.addChild(model);
+    state.model = model;
+    hideSprite(true);
+    fitModel();
+    setTimeout(fitModel, 120);
+    startIdle();
+    return model;
+  }
+
+  function mountUrl(url) {
     return ensureRuntime()
       .then(function () {
         if (!ensureApp()) throw new Error('吉祥物还没出来（换个视图再试）');
         destroyModel();
-        return window.PIXI.live2d.Live2DModel.from(built.url, { autoInteract: false });
+        return window.PIXI.live2d.Live2DModel.from(url, { autoInteract: false });
       })
-      .then(function (model) {
-        state.app.stage.removeChildren();
-        state.app.stage.addChild(model);
-        state.model = model;
-        hideSprite(true);
-        fitModel();
-        setTimeout(fitModel, 120);
-        startIdle();
-        return model;
-      });
+      .then(attach);
+  }
+
+  function mount(built) {
+    return mountUrl(built.url);
+  }
+
+  // 没导入过模型时，用同源自带的那个（服务器上真没有就安静地退回静态图）
+  function mountDefault() {
+    if (state.model) return Promise.resolve(null);
+    return fetch(DEFAULT_MODEL, { method: 'HEAD' })
+      .then(function (r) {
+        if (!r.ok) return null;
+        return mountUrl(DEFAULT_MODEL).then(function (model) {
+          state.current = { name: 'rig_sd_v6（自带）' };
+          markButton();
+          return model;
+        });
+      })
+      .catch(function () { return null; });
   }
 
   /* ---------- 导入 ---------- */
@@ -458,6 +482,7 @@
     ensureButton();
     ensureRuntime()
       .then(function () { markButton(); return restore(); })
+      .then(function () { return mountDefault(); })
       .catch(function (err) {
         markButton();
         toast('Live2D 运行时没装上：' + (err && err.message ? err.message : err), 8000);
