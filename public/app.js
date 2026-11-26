@@ -3564,21 +3564,65 @@ setInterval(syncTail, 2000);
 /* ---------------------------------------------------- 全局盯 QQ 登录态
  * 之前只有「QQ 通道」那一页会去看 NapCat 的登录态，而且只是每 120 秒顺手读一次：
  * QQ 被踢下线时人在别的页面，就什么提示都看不到。这里改成不管在哪一页都盯。 */
-const QQW = { inited: false, ok: null, name: '', why: '', lostAt: 0, timer: 0 };
+/* 光看 NapCat 的登录信息不够：账号被踢下线时它照样报已登录、online 也还是 true。
+ * 2026-11-26 22:30 就是这么翻车的：手机端看到阿北离线、发消息直接回 1006514「网络连接异常」，
+ * 而 /api/napcat 仍然 login.ok=true。所以每轮再真打一次要服务器应答的接口确认。 */
+const QQW = { inited: false, ok: null, name: '', why: '', lostAt: 0, timer: 0, fail: 0 };
+
+async function qqAlive(nap) {
+  const port = (nap && nap.port) || '3200';
+  const uid = Number((DAY.qq && DAY.qq.uid) || (nap && nap.login && nap.login.uid) || 0);
+  if (!uid) return { ok: true, why: '' };
+  const ctl = new AbortController();
+  const kill = setTimeout(() => ctl.abort(), 5000);
+  try {
+    const r = await fetch('http://127.0.0.1:' + port + '/get_stranger_info', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ user_id: uid }),
+      signal: ctl.signal,
+    });
+    clearTimeout(kill);
+    const j = await r.json().catch(() => ({}));
+    if (j && j.status === 'ok' && j.data) return { ok: true, why: '' };
+    const m = String((j && (j.message || j.wording)) || '');
+    return {
+      ok: false,
+      why: /1006514|网络连接异常/.test(m) ? '网络连接异常（1006514）'
+        : m ? m.slice(0, 80) : ('retcode ' + (j && j.retcode) + ' / ' + (j && j.status)),
+    };
+  } catch (e) {
+    clearTimeout(kill);
+    return { ok: false, why: (e && e.name === 'AbortError') ? 'QQ 服务器没应答（5 秒超时）' : '请求 QQ 服务器失败' };
+  }
+}
 
 async function qqWatchTick() {
   const nap = await api('/api/napcat').catch(() => null);
   if (!nap) return null;
   const login = !!(nap.login && nap.login.ok);
   const name = (nap.login && (nap.login.nick || nap.login.uid)) || QQW.name || 'QQ';
-  const why = (nap.login && (nap.login.error || nap.login.message)) || (nap.ok === false ? nap.error : '') || '';
+  let why = (nap.login && (nap.login.error || nap.login.message)) || (nap.ok === false ? nap.error : '') || '';
+  let alive = login;
+  // 只有「NapCat 说登录着」才需要再确认；连续两轮没应答才算掉线，免得网络抖一下就误报
+  if (login) {
+    const probe = await qqAlive(nap);
+    if (probe.ok) {
+      QQW.fail = 0;
+    } else if (++QQW.fail >= 2) {
+      alive = false;
+      why = probe.why || 'NapCat 说在线，但连不上 QQ 服务器';
+    }
+  } else {
+    QQW.fail = 0;
+  }
   if (!QQW.inited) {
     QQW.inited = true;
-    QQW.ok = login;
-    QQW.name = login ? name : '';
+    QQW.ok = alive;
+    QQW.name = alive ? name : '';
     return nap;
   }
-  if (QQW.ok && !login) {
+  if (QQW.ok && !alive) {
     QQW.ok = false;
     QQW.why = why;
     QQW.lostAt = Date.now();
@@ -3590,14 +3634,15 @@ async function qqWatchTick() {
       }
     } catch { /* 通知失败不影响主流程 */ }
     if (S.view === 'qq' && typeof DAY.qqRepaint === 'function') DAY.qqRepaint();
-  } else if (!QQW.ok && login) {
+  } else if (!QQW.ok && alive) {
     QQW.ok = true;
     QQW.name = name;
     QQW.why = '';
     QQW.lostAt = 0;
+    QQW.fail = 0;
     toast(`${name} 回来了`);
     if (S.view === 'qq' && typeof DAY.qqRepaint === 'function') DAY.qqRepaint();
-  } else if (login) {
+  } else if (alive) {
     QQW.name = name;
   }
   return nap;
@@ -4955,9 +5000,10 @@ function qqLiveHtml() {
   const nap = DAY.napcat || {};
   const login = nap.login && nap.login.ok;
   // QQW 记着「刚才还是登录状态，现在掉了」这件事——只有它知道是掉线还是从没登过
-  const dropped = !login && QQW.ok === false && !!QQW.lostAt;
-  const pill = login ? '<span class="pill ok">已登录</span>'
-    : dropped ? '<span class="pill warn">掉线了</span>'
+  // 注意：掉线时 NapCat 自己仍报 login.ok=true（假在线），所以这里不能带 !login 条件
+  const dropped = QQW.ok === false && !!QQW.lostAt;
+  const pill = dropped ? '<span class="pill warn">掉线了</span>'
+    : login ? '<span class="pill ok">已登录</span>'
       : nap.portOpen ? '<span class="pill warn">端口通了，没登录</span>'
         : nap.exists ? '<span class="pill off">NapCat 没起来</span>' : '<span class="pill off">没找到 NapCat</span>';
   const dropWarn = dropped
