@@ -3313,6 +3313,7 @@ function bindEvents() {
   $('#importNavBtn').addEventListener('click', openImportPage);
   $('#skillsNavBtn').addEventListener('click', openSkillsPage);
 $('#learnNavBtn').addEventListener('click', openLearnPage);
+$('#eventsNavBtn').addEventListener('click', openEventsPage);
   $('#pageBack').addEventListener('click', () => setView('chat'));
   $('#pageBackBtn').addEventListener('click', () => setView('chat'));
 
@@ -3635,6 +3636,10 @@ async function qqWatchTick() {
       }
     } catch { /* 通知失败不影响主流程 */ }
     if (S.view === 'qq' && typeof DAY.qqRepaint === 'function') DAY.qqRepaint();
+    api('/api/events', {
+      method: 'POST',
+      body: { kind: 'qq', level: 'warn', title: `QQ 掉线：${name}`, detail: { why, at: new Date(QQW.lostAt).toISOString(), napcatLogin: !!login } },
+    }).catch(() => {});
   } else if (!QQW.ok && alive) {
     QQW.ok = true;
     QQW.name = name;
@@ -3642,6 +3647,10 @@ async function qqWatchTick() {
     QQW.lostAt = 0;
     QQW.fail = 0;
     toast(`${name} 回来了`);
+    api('/api/events', {
+      method: 'POST',
+      body: { kind: 'qq', level: 'ok', title: `QQ 回来了：${name}`, detail: { at: new Date().toISOString() } },
+    }).catch(() => {});
     if (S.view === 'qq' && typeof DAY.qqRepaint === 'function') DAY.qqRepaint();
   } else if (alive) {
     QQW.name = name;
@@ -3664,7 +3673,7 @@ async function loadCalendarState() {
 /* ------------------------------------------------------------------ 整页视图 */
 
 const VIEW_TITLES = {
-  chat: '', day: '日历 · 时钟', qq: 'QQ 通道', plugins: '插件与通道', import: '导入对话', skills: '技能包', learn: '自学习', settings: '设置',
+  chat: '', day: '日历 · 时钟', qq: 'QQ 通道', plugins: '插件与通道', import: '导入对话', skills: '技能包', learn: '自学习', events: '事件记录', settings: '设置',
 };
 
 // 右下角吉祥物：点一下说句话，换页时让开
@@ -3767,7 +3776,7 @@ function setView(view) {
   S.view = view;
   $('#chatView').classList.toggle('hidden', view !== 'chat');
   $('#pageView').classList.toggle('hidden', view === 'chat');
-  for (const [id, v] of [['clockBtn', 'day'], ['qqNavBtn', 'qq'], ['pluginsBtn', 'plugins'], ['importNavBtn', 'import'], ['skillsNavBtn', 'skills'], ['learnNavBtn', 'learn'], ['settingsBtn', 'settings']]) {
+  for (const [id, v] of [['clockBtn', 'day'], ['qqNavBtn', 'qq'], ['pluginsBtn', 'plugins'], ['importNavBtn', 'import'], ['skillsNavBtn', 'skills'], ['learnNavBtn', 'learn'], ['eventsNavBtn', 'events'], ['settingsBtn', 'settings']]) {
     $('#' + id)?.classList.toggle('on', view === v);
   }
   document.title = view === 'chat' ? 'DeepSeek Local' : `${VIEW_TITLES[view] || ''} · DeepSeek Local`;
@@ -4560,6 +4569,168 @@ function learnCurveSvg(d) {
     + `<line x1="${pad}" y1="${zero}" x2="${W - pad}" y2="${zero}" stroke="var(--border,#e3e7ee)" stroke-dasharray="4 4"></line>`
     + `<polyline points="${pts}" fill="none" stroke="var(--accent,#4c7df0)" stroke-width="1.8"></polyline>${dots}</svg>`
     + `<p class="lt-note">每 25 条一个点，中线是 0；红点是这一段平均情绪绝对值 ≥1.2 的地方（${spikes.length} 个单条突变已单独统计）。</p>`;
+}
+
+// ---------------- 事件记录（这台机器上发生过什么）
+const EVT = { level: '', kind: '', q: '', open: {} };
+
+function evtLevelText(lv) {
+  return ({ info: '信息', ok: '成功', warn: '警告', error: '错误' })[lv] || lv || '信息';
+}
+
+function evtStamp(at) {
+  const d = new Date(at);
+  if (isNaN(d.getTime())) return String(at || '');
+  const now = new Date();
+  const hm = d.toLocaleTimeString('zh-CN', { hour12: false });
+  if (d.toDateString() === now.toDateString()) return hm;
+  return (d.getMonth() + 1) + '/' + d.getDate() + ' ' + hm;
+}
+
+function evtDetailText(e) {
+  const v = e && e.detail;
+  if (!v) return '';
+  if (typeof v === 'string') return v;
+  try { return JSON.stringify(v, null, 2); } catch { return String(v); }
+}
+
+function evtRowHtml(e) {
+  const lv = e.level || 'info';
+  const open = !!EVT.open[e.id];
+  const detail = evtDetailText(e);
+  return `<div class="evt-row${open ? ' open' : ''}" data-id="${esc(e.id)}">
+    <div class="evt-head" data-x="evtToggle" data-id="${esc(e.id)}">
+      <span class="evt-time">${esc(evtStamp(e.at))}</span>
+      <span class="evt-lv lv-${esc(lv)}">${esc(evtLevelText(lv))}</span>
+      <span class="evt-kind">${esc(e.kind || 'note')}</span>
+      <span class="evt-title">${esc(e.title || '(没写标题)')}</span>
+      ${detail ? `<span class="evt-more">${open ? '收起' : '详情'}</span>` : ''}
+    </div>
+    ${open && detail ? `<pre class="evt-detail">${esc(detail)}</pre>` : ''}
+  </div>`;
+}
+
+function eventsPageHtml() {
+  const chip = (k, label) => `<button class="evt-chip${EVT.level === k ? ' on' : ''}" data-x="evtLevel" data-lv="${esc(k)}">${esc(label)}</button>`;
+  return `
+<div class="wrap">
+  <div class="lt-panel">
+    <div class="lt-head">
+      <div>
+        <h3>这台机器上发生过什么</h3>
+        <p class="muted">起来的、掉线的、扫过码的、重启过的、发出去的消息、报的错。落盘在 <code>data/events.jsonl</code>，最多留 3000 条，不出这台机器。</p>
+      </div>
+      <div class="lt-actions">
+        <button class="btn" data-x="evtRefresh">刷新</button>
+        <button class="btn ghost" data-x="evtExport">导出</button>
+        <button class="btn ghost" data-x="evtClear">清空</button>
+      </div>
+    </div>
+    <div class="evt-bar">
+      ${chip('', '全部')}${chip('info', '信息')}${chip('ok', '成功')}${chip('warn', '警告')}${chip('error', '错误')}
+      <select id="evtKind" class="evt-sel"><option value="">全部来源</option></select>
+      <input id="evtQ" class="evt-q" type="search" placeholder="搜标题/内容，回车" value="${esc(EVT.q)}">
+      <span class="muted" id="evtHint">正在读…</span>
+    </div>
+    <div id="evtList" class="evt-list"><p class="muted" style="padding:12px 4px">正在读…</p></div>
+  </div>
+</div>`;
+}
+
+async function openEventsPage() {
+  const { body } = pageShell('事件记录', '这台机器上发生过什么：起来、掉线、扫码、重启、发消息、报错……都在这儿。', eventsPageHtml(), 'events');
+  const paint = async () => {
+    const list = body.querySelector('#evtList');
+    const hint = body.querySelector('#evtHint');
+    if (!list) return;
+    const qs = new URLSearchParams({ limit: '300' });
+    if (EVT.level) qs.set('level', EVT.level);
+    if (EVT.kind) qs.set('kind', EVT.kind);
+    if (EVT.q) qs.set('q', EVT.q);
+    let d;
+    try {
+      d = await api('/api/events?' + qs.toString());
+    } catch (e) {
+      if (hint) hint.textContent = '读失败：' + (e.message || e);
+      return;
+    }
+    const sel = body.querySelector('#evtKind');
+    if (sel) {
+      const kinds = d.kinds || [];
+      if (sel.options.length !== kinds.length + 1) {
+        sel.innerHTML = '<option value="">全部来源</option>' + kinds.map((k) => `<option value="${esc(k)}">${esc(k)}</option>`).join('');
+      }
+      sel.value = EVT.kind || '';
+    }
+    const items = d.items || [];
+    if (hint) hint.textContent = `显示 ${items.length} 条${d.total > items.length ? `（库里共 ${d.total} 条）` : ''}`;
+    if (!items.length) {
+      list.innerHTML = '<p class="muted" style="padding:12px 4px">这个筛选下还没有记录。等一会儿，或者去 QQ 通道点点看。</p>';
+      return;
+    }
+    list.innerHTML = items.map(evtRowHtml).join('');
+  };
+  const markChips = () => {
+    body.querySelectorAll('[data-x="evtLevel"]').forEach((b) => {
+      b.classList.toggle('on', (b.getAttribute('data-lv') || '') === EVT.level);
+    });
+  };
+  body.addEventListener('click', async (ev) => {
+    const hit = ev.target.closest('[data-x]');
+    if (!hit) return;
+    const act = hit.getAttribute('data-x');
+    if (act === 'evtToggle') {
+      const id = hit.getAttribute('data-id');
+      EVT.open[id] = !EVT.open[id];
+      await paint();
+      return;
+    }
+    if (act === 'evtLevel') {
+      EVT.level = hit.getAttribute('data-lv') || '';
+      markChips();
+      await paint();
+      return;
+    }
+    if (act === 'evtRefresh') {
+      await paint();
+      toast('刷新了');
+      return;
+    }
+    if (act === 'evtClear') {
+      if (!window.confirm('清空事件记录？旧的会留在 data/events.jsonl.1，没真删。')) return;
+      try {
+        await api('/api/events', { method: 'DELETE' });
+      } catch (e) {
+        toast('清空失败：' + (e.message || e), 6000);
+        return;
+      }
+      EVT.open = {};
+      await paint();
+      toast('清空了');
+      return;
+    }
+    if (act === 'evtExport') {
+      try {
+        const d = await api('/api/events?limit=2000');
+        const blob = new Blob([JSON.stringify(d.items || [], null, 2)], { type: 'application/json' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'events-' + dayStrOf() + '.json';
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+        toast('导出了 ' + (d.items || []).length + ' 条');
+      } catch (e) {
+        toast('导出失败：' + (e.message || e), 6000);
+      }
+      return;
+    }
+  });
+  const sel = body.querySelector('#evtKind');
+  if (sel) sel.addEventListener('change', () => { EVT.kind = sel.value || ''; paint(); });
+  const box = body.querySelector('#evtQ');
+  if (box) box.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { EVT.q = box.value.trim(); paint(); } });
+  await paint();
+  DAY.timer = setInterval(() => { if (S.view === 'events') paint(); }, 5000);
 }
 
 function learnPageHtml() {

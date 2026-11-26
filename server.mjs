@@ -742,6 +742,57 @@ async function writeJsonFile(file, obj) {
   await fsp.rename(tmp, file);
 }
 
+/* ---------------------------------------------------------------- 事件记录
+ * 「事件管理器」的底：一条事件 = 什么时候、谁、什么事、多严重。
+ * 落盘 data/events.jsonl（一行一条，追加写），内存里留最近 3000 条给页面读，
+ * 免得每次打开页面都把整个文件扫一遍。
+ *   GET    /api/events?limit=&kind=&level=&q=  读
+ *   POST   /api/events                         记一条（kind/level/title/detail）
+ *   DELETE /api/events                         清空（旧文件挪成 events.jsonl.1）
+ */
+const EVENT_FILE = path.join(DATA, 'events.jsonl');
+const EVENTS = [];
+const EVENT_MAX = 3000;
+let evSeq = 0;
+
+async function evLoadRecent() {
+  try {
+    const txt = await fsp.readFile(EVENT_FILE, 'utf8');
+    const lines = txt.split('\n').filter(Boolean).slice(-EVENT_MAX);
+    EVENTS.length = 0;
+    for (const line of lines) {
+      try {
+        const one = JSON.parse(line);
+        if (one && one.at) EVENTS.push(one);
+      } catch { /* 半行/坏行跳过，不能因为一行坏了整个页面空白 */ }
+    }
+  } catch { /* 文件还没生出来是正常的，第一次写的时候会 mkdir */ }
+  return EVENTS.length;
+}
+
+const evReady = evLoadRecent();
+
+/** 记一条事件。level: info / ok / warn / error */
+async function evLog(kind, level, title, detail) {
+  const one = {
+    id: Date.now().toString(36) + '-' + (++evSeq).toString(36),
+    at: new Date().toISOString(),
+    kind: String(kind || 'app'),
+    level: String(level || 'info'),
+    title: String(title || '').slice(0, 300),
+  };
+  if (detail !== undefined && detail !== null && detail !== '') {
+    one.detail = (typeof detail === 'string' ? detail : JSON.stringify(detail)).slice(0, 2000);
+  }
+  EVENTS.push(one);
+  if (EVENTS.length > EVENT_MAX) EVENTS.splice(0, EVENTS.length - EVENT_MAX);
+  try {
+    await fsp.mkdir(DATA, { recursive: true });
+    await fsp.appendFile(EVENT_FILE, JSON.stringify(one) + '\n');
+  } catch { /* 落盘失败不能影响主流程 */ }
+  return one;
+}
+
 // 同一个会话的写操作串行化，避免并发写坏文件
 const locks = new Map();
 function withLock(key, fn) {
@@ -1229,11 +1280,13 @@ async function qqSendText(text) {
     const r = await sendGroup(cfg, String(text));
     qqState.sent += 1;
     qqRemember({ dir: 'out', text: String(text), messageId: String(r.message_id || ''), to: 'group:' + cfg.group });
+    evLog('qq', 'info', '发到 QQ 群 ' + cfg.group, String(text).slice(0, 500)).catch(() => {});
     return { ok: true, to: 'group', group: cfg.group, messageId: String(r.message_id || '') };
   }
   const r = await sendPrivate(cfg, String(text));
   qqState.sent += 1;
   qqRemember({ dir: 'out', text: String(text), messageId: String(r.message_id || ''), to: 'private:' + cfg.uid });
+  evLog('qq', 'info', '发到 QQ（' + (cfg.uid || '?') + '）', String(text).slice(0, 500)).catch(() => {});
   return { ok: true, to: 'private', uid: cfg.uid, messageId: String(r.message_id || '') };
 }
 
@@ -6449,6 +6502,39 @@ async function handleApi(req, res, url) {
     return sendJson(res, 200, { ok: true, event: store.events[i], ...(await calendarState()) });
   }
 
+  // ---------------- 事件记录（事件管理器）
+  if (pathname === '/api/events' && method === 'GET') {
+    await evReady;
+    const eu = new URL(req.url || '/', 'http://127.0.0.1');
+    const limit = Math.min(2000, Math.max(1, Number(eu.searchParams.get('limit')) || 200));
+    const kind = String(eu.searchParams.get('kind') || '').trim();
+    const level = String(eu.searchParams.get('level') || '').trim();
+    const q = String(eu.searchParams.get('q') || '').trim().toLowerCase();
+    let items = EVENTS;
+    if (kind) items = items.filter(o => o.kind === kind);
+    if (level) items = items.filter(o => o.level === level);
+    if (q) items = items.filter(o => String(o.title || '').toLowerCase().includes(q) || String(o.detail || '').toLowerCase().includes(q));
+    return sendJson(res, 200, {
+      ok: true,
+      total: EVENTS.length,
+      kinds: [...new Set(EVENTS.map(o => o.kind))].sort(),
+      levels: [...new Set(EVENTS.map(o => o.level))],
+      file: EVENT_FILE,
+      items: items.slice(-limit).reverse(),
+    });
+  }
+  if (pathname === '/api/events' && method === 'POST') {
+    const body = (await readBody(req)) || {};
+    const one = await evLog(body.kind || 'note', body.level || 'info', body.title || body.msg || '', body.detail);
+    return sendJson(res, 200, { ok: true, event: one });
+  }
+  if (pathname === '/api/events' && method === 'DELETE') {
+    try { await fsp.rename(EVENT_FILE, EVENT_FILE + '.1'); } catch { /* 本来就没文件 */ }
+    EVENTS.length = 0;
+    await evLog('app', 'info', '事件记录清空了（旧的留在 events.jsonl.1）');
+    return sendJson(res, 200, { ok: true });
+  }
+
   // ---------------- QQ 通道
   if (pathname === '/api/qq/state' && method === 'GET') {
     const st = await qqStatus();
@@ -6526,24 +6612,33 @@ async function handleApi(req, res, url) {
 
   if (pathname === '/api/napcat/qr/force' && method === 'POST') {
     try {
-      return sendJson(res, 200, await napcatForceNewQr(await loadSettings()));
+      const r = await napcatForceNewQr(await loadSettings());
+      evLog('napcat', r && r.ok ? 'ok' : 'warn', r && r.ok ? '强制出新码：拿到了新码' : '强制出新码：没成', r).catch(() => {});
+      return sendJson(res, 200, r);
     } catch (e) {
+      evLog('napcat', 'error', '强制出新码：抛错了', e.message).catch(() => {});
       return sendJson(res, 400, { ok: false, forced: false, error: e.message });
     }
   }
 
   if (pathname === '/api/napcat/restart' && method === 'POST') {
     try {
-      return sendJson(res, 200, await restartNapcat(await loadSettings()));
+      const r = await restartNapcat(await loadSettings());
+      evLog('napcat', r && r.ok ? 'ok' : 'warn', r && r.skipped ? '重启 NapCat：没动它' : '重启 NapCat', r).catch(() => {});
+      return sendJson(res, 200, r);
     } catch (e) {
+      evLog('napcat', 'error', '重启 NapCat：抛错了', e.message).catch(() => {});
       return sendJson(res, 400, { ok: false, error: e.message });
     }
   }
 
   if (pathname === '/api/napcat/start' && method === 'POST') {
     try {
-      return sendJson(res, 200, await startNapcat(await loadSettings()));
+      const r = await startNapcat(await loadSettings());
+      evLog('napcat', r && r.ok ? 'ok' : 'warn', '启动 NapCat', r).catch(() => {});
+      return sendJson(res, 200, r);
     } catch (e) {
+      evLog('napcat', 'error', '启动 NapCat：抛错了', e.message).catch(() => {});
       return sendJson(res, 400, { ok: false, error: e.message });
     }
   }
@@ -6570,8 +6665,11 @@ async function handleApi(req, res, url) {
 
   if (pathname === '/api/napcat/heal' && method === 'POST') {
     try {
-      return sendJson(res, 200, await napcatHealOnce({ force: true }));
+      const r = await napcatHealOnce({ force: true });
+      evLog('napcat', r && r.ok ? 'ok' : 'warn', '自动纠错跑了一轮', r).catch(() => {});
+      return sendJson(res, 200, r);
     } catch (e) {
+      evLog('napcat', 'error', '自动纠错：抛错了', e.message).catch(() => {});
       return sendJson(res, 400, { ok: false, error: e.message });
     }
   }
@@ -7448,6 +7546,7 @@ async function main() {
   await writeJsonFile(RUNTIME_FILE, { url, port: actualPort, pid: process.pid, startedAt: now(), node: process.version });
   log(`DeepSeek API 客户端已启动：${url}`);
   log(`数据目录：${DATA}`);
+  evLog('app', 'info', '客户端起来了', { url, port: actualPort, pid: process.pid, node: process.version }).catch(() => {});
 
   if (DESKTOP) {
     const ok = openAppWindow(url);
