@@ -4594,6 +4594,12 @@ function evtDetailText(e) {
   try { return JSON.stringify(v, null, 2); } catch { return String(v); }
 }
 
+const EVT_KIND_NAMES = { app: '客户端', qq: 'QQ', napcat: 'NapCat', ai: 'AI 标注', api: '接口', note: '备注' };
+function evtKindText(k) {
+  const v = String(k || 'note');
+  return EVT_KIND_NAMES[v] || v;
+}
+
 function evtRowHtml(e) {
   const lv = e.level || 'info';
   const open = !!EVT.open[e.id];
@@ -4602,7 +4608,7 @@ function evtRowHtml(e) {
     <div class="evt-head" data-x="evtToggle" data-id="${esc(e.id)}">
       <span class="evt-time">${esc(evtStamp(e.at))}</span>
       <span class="evt-lv lv-${esc(lv)}">${esc(evtLevelText(lv))}</span>
-      <span class="evt-kind">${esc(e.kind || 'note')}</span>
+      <span class="evt-kind">${esc(evtKindText(e.kind))}</span>
       <span class="evt-title">${esc(e.title || '(没写标题)')}</span>
       ${detail ? `<span class="evt-more">${open ? '收起' : '详情'}</span>` : ''}
     </div>
@@ -4656,9 +4662,12 @@ async function openEventsPage() {
     }
     const sel = body.querySelector('#evtKind');
     if (sel) {
-      const kinds = d.kinds || [];
-      if (sel.options.length !== kinds.length + 1) {
-        sel.innerHTML = '<option value="">全部来源</option>' + kinds.map((k) => `<option value="${esc(k)}">${esc(k)}</option>`).join('');
+      const base = ['app', 'qq', 'napcat', 'ai', 'api', 'note'];
+      const kinds = Array.from(new Set([...base, ...(d.kinds || [])]));
+      const sig = kinds.join(',');
+      if (sel.getAttribute('data-sig') !== sig) {
+        sel.innerHTML = '<option value="">全部来源</option>' + kinds.map((k) => `<option value="${esc(k)}">${esc(evtKindText(k))}</option>`).join('');
+        sel.setAttribute('data-sig', sig);
       }
       sel.value = EVT.kind || '';
     }

@@ -793,6 +793,40 @@ async function evLog(kind, level, title, detail) {
   return one;
 }
 
+// ---- 会话里 AI 自己标注的事件：模型写 [[事件|警告|标题]]（级别可省），落盘前抽出来记一条，正文里抹掉
+const AI_EVENT_RE = /\[\[事件\s*[|｜:：]\s*([^\[\]\n]{1,200})\]\]/g;
+const AI_EVENT_LEVELS = new Map([
+  ['信息', 'info'], ['提示', 'info'], ['info', 'info'],
+  ['成功', 'ok'], ['完成', 'ok'], ['ok', 'ok'],
+  ['警告', 'warn'], ['注意', 'warn'], ['warn', 'warn'],
+  ['错误', 'error'], ['失败', 'error'], ['error', 'error'],
+]);
+function parseAiEventTag(inner) {
+  const s = String(inner || '').trim();
+  const m = /^([^|｜]{1,8})[|｜](.+)$/.exec(s);
+  if (m) {
+    const lv = AI_EVENT_LEVELS.get(m[1].trim().toLowerCase());
+    if (lv) return { level: lv, title: m[2].trim() };
+  }
+  return { level: 'info', title: s };
+}
+/** 把正文里的 [[事件…]] 抽出来写进事件记录，返回抹掉标记后的正文 */
+function harvestAiEvents(text, meta = {}) {
+  const src = String(text || '');
+  if (!src || src.indexOf('[[事件') < 0) return src;
+  const found = [];
+  const cleaned = src.replace(AI_EVENT_RE, (all, inner) => {
+    const p = parseAiEventTag(inner);
+    if (p.title) found.push(p);
+    return '';
+  });
+  if (!found.length) return src;
+  const where = { conv: meta.conv || '', convTitle: meta.convTitle || '' };
+  for (const p of found) evLog('ai', p.level, p.title, where).catch(() => {});
+  return cleaned.replace(/[ \t]+$/gm, '').replace(/\n{3,}/g, '\n\n').trim();
+}
+const AI_EVENT_HINT = '要记一条事件，就在回复里写 [[事件|级别|一句话]]（级别用 信息/成功/警告/错误），系统会把它抽进事件记录、并从正文里抹掉。没有值得记的就别写。';
+
 // 同一个会话的写操作串行化，避免并发写坏文件
 const locks = new Map();
 function withLock(key, fn) {
@@ -1357,7 +1391,7 @@ async function chatOnce(conv, text, settings, { attachments = [], relay = null, 
   if (!r.ok) throw new Error(`HTTP ${r.status} ${(await r.text()).slice(0, 200)}`);
   const data = await r.json();
   const msg = data?.choices?.[0]?.message || {};
-  const answer = String(msg.content || '').trim();
+  const answer = harvestAiEvents(String(msg.content || '').trim(), { conv: conv.id, convTitle: conv.title });
   if (!answer) throw new Error('模型返回了空回答');
   const assistant = newMessage('assistant', answer, msg.reasoning_content ? { reasoning: String(msg.reasoning_content) } : {});
   conv.messages.push(assistant);
@@ -4820,7 +4854,7 @@ async function buildMessages(conv, settings, { withTools = false } = {}) {
   let diaryText = '';
   try { diaryText = await diaryApi().readForPrompt({ days: 3, maxChars: 2600 }); } catch (e) { meta.warnings.push('日程表没读出来：' + e.message); }
   if (diaryText) meta.diary = { chars: diaryText.length };
-  const systemPrompt = [...styleParts, settings.selfTune === false ? '' : TUNE_INSTRUCTION, diaryText, ownPrompt].filter(Boolean).join('\n\n');
+  const systemPrompt = [...styleParts, settings.selfTune === false ? '' : TUNE_INSTRUCTION, diaryText, ownPrompt, AI_EVENT_HINT].filter(Boolean).join('\n\n');
   if (systemPrompt) out.push({ role: 'system', content: systemPrompt });
   if (style) meta.style = style;
 
@@ -5662,6 +5696,9 @@ async function handleChat(req, res, presetBody) {
       }
     }
   }
+
+  // ---- AI 自己标注的事件：抽一条进事件记录，标记从正文里抹掉
+  if (contentText) contentText = harvestAiEvents(contentText, { conv: conv.id, convTitle: conv.title });
 
   // ---- 落盘
   const durationMs = now() - startedAt;
