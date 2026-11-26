@@ -575,6 +575,7 @@ const DEFAULT_SETTINGS = {
   eventsSearch: true, // 允许联网查事件时间表（只查关键词，不发对话原文）
   diaryEnabled: true, // 日程表 + 日志：没人说话时自己写一份给模型看的（data/model）
   diaryIdleMin: 30, // 安静多少分钟后才允许写（太短会跟实时回复抢算力）
+  diaryEngine: 'api', // 日程/日志由谁写：api = 走 API 端的模型（稳），local = 本机 gguf（不花钱但 1.5B 写不稳）
   // ---- 推送：允许应用主动往 QQ 推消息（一道权限门，关掉后推送接口一律 403）
   pushEnabled: true,
   pushUid: '', // 推给谁；空 = 回落到 qqUid
@@ -833,6 +834,7 @@ async function saveSettings(patch) {
     if (k === 'eventsLeadMin') { next[k] = Math.max(0, Math.min(1440, Math.floor(Number(v) || 0))); continue; }
     if (k === 'diaryEnabled') { next[k] = !!v; continue; }
     if (k === 'diaryIdleMin') { next[k] = Math.max(5, Math.min(1440, Math.floor(Number(v) || 0))); continue; }
+    if (k === 'diaryEngine') { next[k] = String(v) === 'local' ? 'local' : 'api'; continue; }
     if (k === 'apiKey') next.apiKey = String(v || '').trim();
     else if (k === 'baseUrl') next.baseUrl = String(v || '').trim() || DEFAULT_SETTINGS.baseUrl;
     else if (k === 'temperature') next.temperature = Math.min(2, Math.max(0, Number(v) || 0));
@@ -1539,6 +1541,34 @@ function stopEventsLoop() {
   eventsTimer = null;
 }
 
+/** 走 API 端的一次性对话：不落会话、不建历史，纯粹「让它写一份东西」。
+ *  写日程/日志用它，比本机 1.5B 稳得多（1.5B 会把日程写成十四行「洗碗」）。 */
+async function apiChatOnce(settings, { system, user, maxTokens = 1600, temperature = 0.3 } = {}) {
+  const apiKey = settings.apiKey || process.env.DEEPSEEK_API_KEY || '';
+  if (!apiKey) throw new Error('没填 API Key');
+  const { chat } = apiEndpoints(settings.baseUrl);
+  const raw = settings.model === 'auto' ? '' : String(settings.model || '');
+  const model = normalizeModel(raw || settings.routeChatModel || 'deepseek-v4-pro');
+  const r = await fetch(chat, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+    body: JSON.stringify({
+      model: model === 'auto' ? (settings.routeChatModel || 'deepseek-v4-pro') : model,
+      messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+      stream: false,
+      thinking: { type: 'disabled' },
+      temperature,
+      max_tokens: maxTokens,
+    }),
+    signal: AbortSignal.timeout(180000),
+  });
+  if (!r.ok) throw new Error(`HTTP ${r.status} ${(await r.text()).slice(0, 200)}`);
+  const data = await r.json();
+  const text = String(data?.choices?.[0]?.message?.content || '').trim();
+  if (!text) throw new Error('模型返回了空回答');
+  return text;
+}
+
 // ---- 日程表 + 日志：写给模型自己看的那一份（data/model/calendar.md、data/model/journal/*.md）。
 // 只在「没人说话」的时候写，不抢实时回复的算力；装配上下文时把最近几天的带上（本体在 diary.mjs）。
 let diaryCache = null;
@@ -1549,7 +1579,16 @@ function diaryApi() {
       log,
       chat: async (system, user) => {
         const settings = await loadSettings();
-        // 日程 + 日志一起写，给足输出空间
+        // 日程 + 日志默认交给 API 端的模型写（本机 1.5B 写这种结构化东西不稳）。
+        // 设置里 diaryEngine='local' 或没填 key 时才退回本机 gguf。
+        const apiKey = settings.apiKey || process.env.DEEPSEEK_API_KEY || '';
+        if (settings.diaryEngine !== 'local' && apiKey) {
+          try {
+            return await apiChatOnce(settings, { system, user, maxTokens: 1800, temperature: 0.3 });
+          } catch (e) {
+            log('[日志] API 端没写成，先用本地的顶一次：' + e.message);
+          }
+        }
         const r = await localChat(settings, { system, user, maxTokens: 1000 });
         return r.text;
       },
