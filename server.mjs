@@ -1549,7 +1549,8 @@ function diaryApi() {
       log,
       chat: async (system, user) => {
         const settings = await loadSettings();
-        const r = await localChat(settings, { system, user, maxTokens: 700 });
+        // 日程 + 日志一起写，给足输出空间
+        const r = await localChat(settings, { system, user, maxTokens: 1000 });
         return r.text;
       },
       settingsOf: () => loadSettings(),

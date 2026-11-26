@@ -1,16 +1,14 @@
 // 日程表 + 日志（面向模型的那一份）
 //
-// 要求来自用户：日程表和日志是给**模型**看的，不是给人看的报表；在不活跃时段自己写，
-// 用来做强化记忆。所以：
+// 要求来自用户：日程表和日志都由大模型编辑，是给**模型**看的，不是给人看的报表；
+// 在不活跃时段自己写，用来做强化记忆。所以：
 //   · calendar.md  —— 「接下来要做什么」，模型每次装配上下文时读它
 //   · journal/*.md —— 「之前发生过什么」，按天一段，模型读最近几天
 //   · 只在没人的时候写（距最后一次活动超过 idleMin 分钟），不抢实时回复的算力
 //
-// 一个原则：**能用代码算的不要问模型。** 本机只有 qwen2.5-1.5b，让它生成结构化清单会
-// 退化成「11:00-12:00：洗碗 / 12:00-13:00：洗碗 …」这种复读。所以：
-//   · 日程表 = 事件库里的未完成事项，代码排好直接写文件（模型不参与）
-//   · 日志   = 模型只写「三五句人话」，出来后再做去重/截断的清洗；清洗不干净就整段丢掉，
-//              绝不覆盖已有的日志
+// 两份都由模型写。代码只做三件事：把原料备好（日历里的原始事件、今天的对话片段、
+// 上一版日程表）、给死格式、把模型吐出来的东西清洗一遍（去编号/去复读/限行），
+// 清洗后不合格就整段丢掉——绝不覆盖已有内容。
 //
 // 写不进去就跳过，不要因为日志写不出来而影响聊天。全部 try/catch 兜住。
 
@@ -22,13 +20,29 @@ const dayKey = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate
 function stamp(d = new Date()) { return `${dayKey(d)} ${pad(d.getHours())}:${pad(d.getMinutes())}`; }
 const clip = (s, n) => { const t = String(s || ''); return t.length > n ? t.slice(0, n) + '…' : t; };
 
-// 只写日志，不写日程表——日程表由代码排
 const SYS = [
-  '你在写今天的工作日志，写给自己看。',
-  '只要事实：聊了什么、定下什么、做到哪一步、下一步干什么、踩了什么坑。',
-  '三句话，每句一行，不要开头客套，不要小标题，不要复述原话。',
-  '不知道的别编，宁可不写。',
+  '你在维护给自己看的两样东西：日程表（接下来要做什么）和日志（今天发生过什么）。',
+  '严格按下面这个格式输出，不要别的话：',
+  '<日程>',
+  '- 2026-12-02 10:00 去医院复查',
+  '</日程>',
+  '<日志>',
+  '今天定下了日程表和日志的写法，日程表改由模型编辑。',
+  '顺手把提醒文案里的机器腔去掉了。',
+  '</日志>',
+  '规则：日程表最多 8 行，每行「- 日期 时间 事项」，按时间从早到晚；只写还没发生的事，',
+  '已经过去的、已经做完的删掉。日志三到五句，每句一行，只写事实，不要小标题不要客套。',
+  '原料里没有的事不要编。',
 ].join('\n');
+
+/** 从模型输出里取两段；标签缺了就整段当日志 */
+function splitSections(raw) {
+  const s = String(raw || '');
+  const cal = /<日程>([\s\S]*?)<\/日程>/.exec(s);
+  const jr = /<日志>([\s\S]*?)<\/日志>/.exec(s);
+  if (cal || jr) return { calendar: cal ? cal[1] : '', journal: jr ? jr[1] : '' };
+  return { calendar: '', journal: s };
+}
 
 export function createDiary({ dataDir, log = () => {}, chat, settingsOf, recentText, lastActivityAt, upcoming = null }) {
   const root = path.join(dataDir, 'model');
@@ -65,23 +79,48 @@ export function createDiary({ dataDir, log = () => {}, chat, settingsOf, recentT
     return clip(body, maxChars);
   }
 
-  /** 从事件库排日程表：只留还没到点的、未完成的，最多 12 条 */
-  async function buildCalendar(now = Date.now()) {
+  /** 原料：日历里还没发生、还没完成的事（原样给模型，不给它排好） */
+  async function eventMaterial(now = Date.now()) {
     let list = [];
     try { list = (await upcoming()) || []; } catch { list = []; }
-    const rows = list
+    return list
       .filter(e => e && e.title && Number(e.at) > now - 3600e3 && e.status !== 'done' && e.status !== 'fired')
       .sort((a, b) => a.at - b.at)
       .slice(0, 12)
       .map(e => {
         const d = new Date(Number(e.at));
-        const day = dayKey(d) === dayKey(new Date(now)) ? '今天' : `${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-        return `- ${day} ${pad(d.getHours())}:${pad(d.getMinutes())}　${String(e.title).trim()}`;
-      });
-    return rows.length ? rows.join('\n') : '- （手上没有排定的事）';
+        return `${dayKey(d)} ${pad(d.getHours())}:${pad(d.getMinutes())} ${String(e.title).trim()}`;
+      })
+      .join('\n');
   }
 
-  /** 清掉模型复读出来的垃圾：单行去重、整行重复超过一次的直接丢、最多 4 行 */
+  /** 清洗模型写的日程：去编号、去复读、限 8 行；不合格返空（调用方保留旧版） */
+  function cleanCalendar(raw) {
+    const lines = String(raw || '')
+      .split(/\r?\n/)
+      .map(s => s.replace(/^\s*[-*·•]\s*/, '').replace(/^#+\s*/, '').replace(/^\d+[.、)）]\s*/, '').trim())
+      .filter(Boolean);
+    const seen = new Set();
+    const out = [];
+    for (const line of lines) {
+      if (line.length < 4 || line.length > 80) continue;
+      if (/^(日程表?|日志|今天|明天)$/.test(line)) continue;
+      if (line.length <= 14 && /[：:]$/.test(line)) continue;
+      const key = line.replace(/\s/g, '');
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(line);
+      if (out.length >= 8) break;
+    }
+    const joined = out.join('\n');
+    if (!joined) return '';
+    if (/^(.{2,12})\1{2,}/.test(joined.replace(/\n/g, ''))) return '';
+    // 一条都不带日期时间 = 模型没照格式写，宁可不要
+    if (!out.some(l => /\d{1,2}[-/月]\d{1,2}|\d{1,2}:\d{2}|今天|明天|后天/.test(l))) return '';
+    return clip(out.map(l => `- ${l}`).join('\n'), 800);
+  }
+
+  /** 清掉模型复读出来的垃圾：单行去重、整行重复超过一次的直接丢、最多 5 行 */
   function cleanJournal(raw) {
     const lines = String(raw || '')
       .split(/\r?\n/)
@@ -97,12 +136,12 @@ export function createDiary({ dataDir, log = () => {}, chat, settingsOf, recentT
       if (seen.has(key)) continue;
       seen.add(key);
       out.push(line);
-      if (out.length >= 4) break;
+      if (out.length >= 5) break;
     }
-    // 句子里同一个短语重复三次以上 = 退化，整段不要
     const joined = out.join('\n');
+    if (!joined) return '';
     if (/^(.{2,12})\1{2,}/.test(joined.replace(/\n/g, ''))) return '';
-    return clip(joined, 420);
+    return clip(joined, 520);
   }
 
   /** 写一次。force=true 时无视「不活跃」与「刚写过」的闸 */
@@ -121,36 +160,41 @@ export function createDiary({ dataDir, log = () => {}, chat, settingsOf, recentT
     let wroteCal = false;
     let journal = '';
     try {
-      // 1) 日程表：代码排，不经过模型
-      const calBody = await buildCalendar();
-      const calText = `# 日程表\n\n_更新于 ${stamp()}_\n\n${calBody}\n`;
-      if (calText !== await readText(calendarPath)) { await writeText(calendarPath, calText); wroteCal = true; }
-
-      // 2) 日志：模型写三五句，人话，出来清洗
+      const mats = await eventMaterial();
+      const prevCal = await readCalendar();
+      const prevCalBody = prevCal.replace(/^#[^\n]*\n+/, '').replace(/^_更新于[^\n]*_\n*/m, '').trim();
       const text = clip(String(await recentText({ hours: 24, maxChars: 2600 }) || '').trim(), 2600);
-      if (text) {
+
+      const user = [
+        `现在是 ${stamp()}。`,
+        mats ? `日历里已经排定的事（原始数据）：\n${mats}` : '日历里还没排定任何事。',
+        prevCalBody ? `上一版日程表长这样，在它基础上改（该删的删、该留的留）：\n${prevCalBody}` : '',
+        text ? `今天聊过的片段：\n${text}` : '今天还没聊过。',
+        '按格式输出日程表和日志。',
+      ].filter(Boolean).join('\n\n');
+
+      const parts = splitSections(await chat(SYS, user));
+      const calBody = cleanCalendar(parts.calendar);
+      if (calBody) {
+        const calText = `# 日程表\n\n_更新于 ${stamp()}_\n\n${calBody}\n`;
+        if (calText !== await readText(calendarPath)) { await writeText(calendarPath, calText); wroteCal = true; }
+      }
+
+      journal = cleanJournal(parts.journal);
+      if (journal) {
         const today = dayKey(new Date());
         const prevJr = await readJournal(today);
-        const user = [
-          `现在是 ${stamp()}。`,
-          '下面是今天聊过的片段：',
-          text,
-          '',
-          '写三句话（每句一行）当今天的日志。',
-        ].join('\n');
-        journal = cleanJournal(await chat(SYS, user));
-        if (journal) {
-          const block = `## ${stamp().slice(11)}\n${journal}\n`;
-          const head = prevJr ? '' : `# ${today}\n\n`;
-          await writeText(path.join(journalDir, `${today}.md`), `${head}${prevJr ? prevJr.trimEnd() + '\n\n' : ''}${block}`);
-        }
+        const block = `## ${stamp().slice(11)}\n${journal}\n`;
+        const head = prevJr ? '' : `# ${today}\n\n`;
+        await writeText(path.join(journalDir, `${today}.md`), `${head}${prevJr ? prevJr.trimEnd() + '\n\n' : ''}${block}`);
       }
+
       if (!wroteCal && !journal) { state.lastReason = '没有新的东西可写'; return { ok: false, error: state.lastReason }; }
       state.lastWriteAt = Date.now();
       state.lastReason = reason;
       state.wrote += 1;
       state.lastError = '';
-      log(`[日志] 写完了（${reason}）日程 ${wroteCal ? '重排' : '没变'} / 日志 ${journal ? journal.length + ' 字' : '空'}`);
+      log(`[日志] 写完了（${reason}）日程 ${wroteCal ? '已更新' : '没变'} / 日志 ${journal ? journal.length + ' 字' : '空'}`);
       return { ok: true, calendar: wroteCal ? calBody : '', journal };
     } catch (e) {
       state.lastError = e.message;
