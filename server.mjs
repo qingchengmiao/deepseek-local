@@ -2114,15 +2114,11 @@ async function napcatForceNewQr(settings, { waitMs = 300000 } = {}) {
     out.killedResidual = [];
   }
   if (out.killedResidual.length) await new Promise(r => setTimeout(r, 1500));
-  // start 不能 await：它会阻塞几分钟，await 就等于永远不轮询
+  // start 不 await（下面 napcatHostRun 的 start 分支已经改成「隐藏控制台起完就返回」，
+  // 不会阻塞，也不弹命令行窗口了）
   const exe = napcatHostExe(settings);
   if (exe) {
-    try {
-      // 不加 detached：本机（Node + Windows）实测带 detached 时子进程 exit=0 但命令根本没执行；
-      // 只留 unref()，Windows 下父进程退出也不会带走它。
-      const child = spawn(exe, ['start', ...napcatHostArgs(settings)], { stdio: 'ignore', windowsHide: true });
-      child.unref();
-    } catch { /* 起不来就让下面的轮询去报错 */ }
+    try { await napcatHostRun(settings, 'start'); } catch { /* 起不来就让下面的轮询去报错 */ }
   }
   let qr = null;
   let st = null;
@@ -2160,8 +2156,8 @@ async function startNapcat(settings) {
     return { ok: true, via: 'host', launcher: '(C++ 宿主)', shell, running: !!r.running, already: Number(r.code) === 3 };
   }
   if (!launcher) throw new Error(`没在 ${dir} 里找到启动器（扫码登录.bat / start-napcat-A.bat），也不是 Shell 副本（NapCatWinBootMain.exe）`);
-  const child = spawn('cmd.exe', ['/c', launcher], { cwd: dir, detached: true, stdio: 'ignore', windowsHide: true });
-  child.unref();
+  // 同样走隐藏控制台：.bat 起的整棵树（cmd → NapCat → QQ）才不会各自弹窗
+  await spawnHiddenConsole('cmd.exe', ['/c', launcher], { cwd: dir });
   return { ok: true, via: 'bat', launcher };
 }
 
@@ -2319,7 +2315,101 @@ function napcatHostArgs(settings) {
   return args;
 }
 
+// ★ Windows 上 windowsHide:true 走的是 CREATE_NO_WINDOW —— 子进程**没有控制台**。
+// 于是 NapCat 自己拉起的下一层（NapCatWinBootMain → QQ.exe 的控制台部分）各自
+// CreateProcess 一个新控制台，屏幕上就是一串命令行窗口，而且关掉还会带崩服务。
+// 正确做法是给它一个「存在但隐藏」的控制台：由 PowerShell 的 Start-Process
+// -WindowStyle Hidden 启动（CREATE_NEW_CONSOLE + SW_HIDE），目标进程拥有一个隐藏
+// 控制台，后代继承它，就不会再各自弹窗。
+//
+// 两条实测结论（2026-11-27）：
+// ① VBS（wscript + WScript.Shell.Run ",0"）在本机不可用：cscript 直接报
+//    「变量未定义: 'sh'」，wscript 那条还残留进程。
+// ② `stdio: 'ignore'` 会让 PowerShell 里这句 Start-Process **什么都不做**
+//    （同一命令换成默认管道就正常执行）。所以这里**不能用 stdio: 'ignore'**，
+//    改成把输出接走丢掉；PowerShell 跑完自己退出，不会挂住。
+async function spawnHiddenConsole(exe, args = [], { cwd } = {}) {
+  const dir = cwd || path.dirname(exe) || process.cwd();
+  const pq = (s) => "'" + String(s).replace(/'/g, "''") + "'";
+  const argList = args.length ? ' -ArgumentList ' + args.map(pq).join(',') : '';
+  const ps =
+    `Start-Process -WindowStyle Hidden -WorkingDirectory ${pq(dir)} -FilePath ${pq(exe)}${argList}`;
+  const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { windowsHide: true });
+  try { child.stdout && child.stdout.resume(); } catch { }
+  try { child.stderr && child.stderr.resume(); } catch { }
+  child.on('error', () => { });
+  child.unref();
+  return { ok: true, via: 'start-process-hidden', exe, cmdLine: [exe, ...args].join(' '), ps };
+}
+
+/** 日志目录里最新的 mtime（毫秒）；目录不存在就给 0 —— 用来判断新一代有没有真的跑起来 */
+async function newestMtime(dir) {
+  try {
+    const names = await fsp.readdir(dir);
+    let best = 0;
+    for (const n of names) {
+      const st = await fsp.stat(path.join(dir, n)).catch(() => null);
+      if (st && st.isFile() && st.mtimeMs > best) best = st.mtimeMs;
+    }
+    return best;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * 「起来了但要确认它真活着」——隐藏控制台起 NapCat 时踩过的坑（2026-11-27）：
+ * 有时 QQ 进程起来了、NapCat 那层却完全不初始化：日志目录一个新文件都不落、3200 永远不通。
+ * 这里盯 100 秒，没动静就清掉重来一次（只重试一次，不无限拉进程树）。
+ */
+async function napcatStartWatch(settings, exe, logDir, stampBefore, extraArgs = []) {
+  const deadline = Date.now() + 100000;
+  let moved = false;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 5000));
+    const now = await newestMtime(logDir);
+    if (now && now > stampBefore) { moved = true; break; }
+    const qr = await napcatQrOnly(settings).catch(() => null);
+    if (qr && qr.hash && qr.fresh) { moved = true; break; }
+  }
+  if (moved) return { ok: true, retried: false };
+  await evLog('napcat', 'warn', '这一代 NapCat 没起来，重来一次', { waitedSec: 100, logDir, exe }).catch(() => { });
+  const killed = await napcatKillResidualTree().catch(() => []);
+  await new Promise((r) => setTimeout(r, 2500));
+  const stamp2 = await newestMtime(logDir);
+  await spawnHiddenConsole(exe, ['start', ...napcatHostArgs(settings), ...extraArgs], { cwd: path.dirname(exe) }).catch(() => { });
+  await evLog('napcat', 'info', '已重试启动 NapCat', { killed, stamp2 }).catch(() => { });
+  return { ok: false, retried: true, killed };
+}
+
 async function napcatHostRun(settings, verb, extraArgs = []) {
+  // start 单独走：① 起的过程会阻塞几分钟，await 等于卡死调用方；
+  // ② 必须用隐藏控制台起，否则 NapCat 的下层进程各自弹命令行窗口。
+  if (verb === 'start') {
+    const exe0 = napcatHostExe(settings);
+    if (!exe0) return { ok: false, error: '没找到 DSLNapCatHost.exe（先跑 napcat/build.ps1 编译）', exe: '' };
+    const st0 = await napcatHostRun(settings, 'status').catch(() => null);
+    if (st0 && Array.isArray(st0.pids) && st0.pids.length) {
+      return { ok: true, verb, alreadyRunning: true, code: 3, exe: exe0, message: '宿主已经在跑' };
+    }
+    // 2026-11-27 实测：停掉一代之后「紧接着」起新一代，QQ 会起来但 NapCat 那层根本
+    // 不初始化（日志目录一个新文件都不落、3200 永远不通）。等它彻底断干净再起就好使。
+    // 所以起之前先清残留、再等 2.5 秒。
+    const leftovers = await napcatKillResidualTree().catch(() => []);
+    if (leftovers && leftovers.length) await new Promise((r) => setTimeout(r, 2500));
+    // 起之前记下日志目录最新时间，用来判断这一代到底有没有真的跑起来。
+    const logDir = path.join(String(settings.qqNapCatDir || '').trim() || 'D:\\NapCatDSL\\Shell', 'logs');
+    const stampBefore = await newestMtime(logDir);
+    try {
+      await spawnHiddenConsole(exe0, ['start', ...napcatHostArgs(settings), ...extraArgs], { cwd: path.dirname(exe0) });
+    } catch (e) {
+      return { ok: false, verb, error: String((e && e.message) || e), exe: exe0 };
+    }
+    // 起完盯一段时间：100 秒内日志目录没动静 = 这一代是死的，清掉重来一次。
+    // 不 await（起一台要几分钟，等它就把接口卡住了）。
+    napcatStartWatch(settings, exe0, logDir, stampBefore, extraArgs).catch(() => { });
+    return { ok: true, verb, spawned: true, alreadyRunning: false, code: 0, exe: exe0, message: '已用隐藏控制台拉起' };
+  }
   const exe = napcatHostExe(settings);
   if (!exe) return { ok: false, error: '没找到 DSLNapCatHost.exe（先跑 napcat/build.ps1 编译）', exe: '' };
   const r = await runCli(exe, [verb, ...napcatHostArgs(settings), ...extraArgs], { timeoutMs: 90000 });
@@ -7528,7 +7618,7 @@ function openAppWindow(url) {
       '--no-first-run', '--no-default-browser-check',
       '--disable-features=Translate,MediaRouter',
     ];
-    spawn(exe, args, { detached: true, stdio: 'ignore' }).unref();
+    spawn(exe, args, { detached: true, stdio: 'ignore', windowsHide: true }).unref();
     return true;
   } catch (e) {
     log('打开应用窗口失败，退回浏览器：' + e.message);
