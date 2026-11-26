@@ -187,6 +187,8 @@
     canvas.style.height = '100%';
     host.appendChild(canvas);
     state.app = app;
+    app.ticker.add(tickFocus);
+    bindPointer();
     if (window.ResizeObserver) {
       var ro = new ResizeObserver(function () { fitModel(); });
       ro.observe(host);
@@ -203,7 +205,7 @@
     app.renderer.resize(w, h);
     var mw = model.internalModel.width || model.width || 1;
     var mh = model.internalModel.height || model.height || 1;
-    var scale = Math.min(w / mw, h / mh) * 1.04;
+    var scale = Math.min((w / mw) * 1.35, h / mh) * 0.98;
     model.scale.set(scale);
     model.anchor.set(0.5, 1);
     model.position.set(w / 2, h);
@@ -213,6 +215,44 @@
     if (state.img) state.img.style.visibility = hide ? 'hidden' : '';
     var root = mascotRoot();
     if (root) root.classList.toggle('l2d-on', !!hide);
+  }
+
+  /* ---------- 看鼠标方向 ---------- */
+  function bindPointer() {
+    if (state._ptr) return;
+    state._ptr = true;
+    window.addEventListener('mousemove', function (e) {
+      if (!state.host) return;
+      var r = state.host.getBoundingClientRect();
+      if (!r.width) return;
+      state._pt = { x: e.clientX - r.left, y: e.clientY - r.top };
+    }, { passive: true });
+    window.addEventListener('mouseleave', function () { state._pt = null; });
+  }
+
+  function tickFocus() {
+    var model = state.model;
+    if (!model || !model.internalModel || !state._pt) return;
+    try { model.focus(state._pt.x, state._pt.y); } catch (e) {}
+  }
+
+  /* ---------- 小动作：吃东西 / 玩电脑 ---------- */
+  var ACTS = ['Eat', 'Computer'];
+
+  function play(name) {
+    var model = state.model;
+    if (!model || !model.internalModel) return false;
+    try { model.motion(name, 0); return true; } catch (e) { return false; }
+  }
+
+  function startActs() {
+    clearInterval(state._acts);
+    state._acts = setInterval(function () {
+      if (document.hidden || state.acting) return;
+      state.acting = true;
+      play(ACTS[Math.floor(Math.random() * ACTS.length)]);
+      setTimeout(function () { state.acting = false; }, 9500);
+    }, 40000 + Math.floor(Math.random() * 25000));
   }
 
   function startIdle() {
@@ -230,10 +270,12 @@
         model.motion(idle, Math.floor(Math.random() * Math.max(1, list.length)));
       } catch (e) {}
     }, 12000);
+    startActs();
   }
 
   function destroyModel() {
     clearInterval(state._idle);
+    clearInterval(state._acts);
     if (state.model) {
       try { state.model.destroy(); } catch (e) {}
       state.model = null;
@@ -493,6 +535,7 @@
 
   state.ready = true;
   window.mascotL2D = {
+    play: play,
     import: pickFolder,
     clear: clearModel,
     mount: mount,

@@ -1,86 +1,100 @@
 {
-	"Version": 3,
-	"FileReferences": {
-		"Moc": "dsniang4.moc3",
-		"Textures": [
-			"dsniang4.4096/texture_00.png",
-			"dsniang4.4096/texture_01.png"
-		],
-		"Physics": "dsniang4.physics3.json",
-		"DisplayInfo": "dsniang4.cdi3.json",
-		"Expressions": [
-			{
-				"Name": "微笑",
-				"File": "dsniang4.smile.exp3.json"
-			},
-			{
-				"Name": "悲伤",
-				"File": "dsniang4.sad.exp3.json"
-			},
-			{
-				"Name": "生气",
-				"File": "dsniang4.angry.exp3.json"
-			},
-			{
-				"Name": "惊讶",
-				"File": "dsniang4.surprised.exp3.json"
-			},
-			{
-				"Name": "害羞",
-				"File": "dsniang4.shy.exp3.json"
-			},
-			{
-				"Name": "困倦",
-				"File": "dsniang4.sleepy.exp3.json"
-			},
-			{
-				"Name": "阴沉",
-				"File": "dsniang4.gloom.exp3.json"
-			}
-		],
-		"Motions": {
-			"Idle": [
-				{
-					"File": "dsniang4.idle.motion3.json"
-				}
-			],
-			"Blink": [
-				{
-					"File": "dsniang4.blink.motion3.json"
-				}
-			],
-			"Nod": [
-				{
-					"File": "dsniang4.nod.motion3.json"
-				}
-			],
-			"Shake": [
-				{
-					"File": "dsniang4.shake.motion3.json"
-				}
-			],
-			"Talk": [
-				{
-					"File": "dsniang4.talk.motion3.json"
-				}
-			]
-		}
-	},
-	"Groups": [
-		{
-			"Target": "Parameter",
-			"Name": "EyeBlink",
-			"Ids": [
-				"ParamEyeLOpen",
-				"ParamEyeROpen"
-			]
-		},
-		{
-			"Target": "Parameter",
-			"Name": "LipSync",
-			"Ids": [
-				"ParamMouthOpenY"
-			]
-		}
-	]
+  "Version": 3,
+  "FileReferences": {
+    "Moc": "dsniang4.moc3",
+    "Textures": [
+      "dsniang4.4096/texture_00.png",
+      "dsniang4.4096/texture_01.png"
+    ],
+    "Physics": "dsniang4.physics3.json",
+    "DisplayInfo": "dsniang4.cdi3.json",
+    "Expressions": [
+      {
+        "Name": "微笑",
+        "File": "dsniang4.smile.exp3.json"
+      },
+      {
+        "Name": "悲伤",
+        "File": "dsniang4.sad.exp3.json"
+      },
+      {
+        "Name": "生气",
+        "File": "dsniang4.angry.exp3.json"
+      },
+      {
+        "Name": "惊讶",
+        "File": "dsniang4.surprised.exp3.json"
+      },
+      {
+        "Name": "害羞",
+        "File": "dsniang4.shy.exp3.json"
+      },
+      {
+        "Name": "困倦",
+        "File": "dsniang4.sleepy.exp3.json"
+      },
+      {
+        "Name": "阴沉",
+        "File": "dsniang4.gloom.exp3.json"
+      }
+    ],
+    "Motions": {
+      "Idle": [
+        {
+          "File": "dsniang4.idle.motion3.json"
+        }
+      ],
+      "Blink": [
+        {
+          "File": "dsniang4.blink.motion3.json"
+        }
+      ],
+      "Nod": [
+        {
+          "File": "dsniang4.nod.motion3.json"
+        }
+      ],
+      "Shake": [
+        {
+          "File": "dsniang4.shake.motion3.json"
+        }
+      ],
+      "Talk": [
+        {
+          "File": "dsniang4.talk.motion3.json"
+        }
+      ],
+      "Eat": [
+        {
+          "File": "dsniang4.eat.motion3.json",
+          "FadeInTime": 0.8,
+          "FadeOutTime": 1.0
+        }
+      ],
+      "Computer": [
+        {
+          "File": "dsniang4.computer.motion3.json",
+          "FadeInTime": 0.8,
+          "FadeOutTime": 1.0
+        }
+      ]
+    }
+  },
+  "Groups": [
+    {
+      "Target": "Parameter",
+      "Name": "EyeBlink",
+      "Ids": [
+        "ParamEyeLOpen",
+        "ParamEyeROpen"
+      ]
+    },
+    {
+      "Target": "Parameter",
+      "Name": "LipSync",
+      "Ids": [
+        "ParamMouthOpenY"
+      ]
+    }
+  ]
 }

@@ -1288,3 +1288,20 @@ html[data-theme="dark"] .msg-actions { opacity: .42; }
 .st-row .st-at { opacity: .7; font-variant-numeric: tabular-nums; }
 .st-row .st-why { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .st-row .st-back { height: 24px; padding: 0 8px; font-size: 12px; }
+
+/* Live2D 吉祥物：矩形画布，比静态图占位更大 */
+.mascot.l2d-on {
+  width: 340px;
+  height: 330px;
+  right: 10px;
+  bottom: 4px;
+  background: transparent;
+  pointer-events: none;
+}
+.mascot.l2d-on .mascot-l2d { inset: 0; }
+@media (max-width: 900px) {
+  .mascot.l2d-on { width: 260px; height: 250px; }
+}
+@media (max-width: 640px) {
+  .mascot.l2d-on { display: none; }
+}
