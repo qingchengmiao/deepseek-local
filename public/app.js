@@ -3905,6 +3905,50 @@ async function openQqPage() {
         } finally { x.disabled = false; }
         return;
       }
+      if (act === 'evRefresh' || act === 'evTick') {
+        x.disabled = true;
+        const box = body.querySelector('#evBox');
+        try {
+          if (act === 'evTick') await api('/api/events/tick', { method: 'POST', body: {} }).catch(() => null);
+          const r = await api('/api/events');
+          if (box) box.innerHTML = evListHtml(r);
+          if (act === 'evTick' && r && r.enabled === false) toast('事件总开关是关的', 3000);
+        } catch (e) { if (box) box.textContent = '没读成：' + e.message; }
+        finally { x.disabled = false; }
+        return;
+      }
+      if (act === 'evSave') {
+        x.disabled = true;
+        const box = body.querySelector('#evBox');
+        try {
+          const patch = {
+            eventsEnabled: body.querySelector('#evEnabled').value === '1',
+            eventsAutoScan: body.querySelector('#evAuto').value === '1',
+            eventsSearch: body.querySelector('#evSearch').value === '1',
+            eventsLeadMin: Number(body.querySelector('#evLead').value || 10),
+          };
+          await api('/api/settings', { method: 'PUT', body: patch });
+          if (box) box.textContent = `存好了：${patch.eventsEnabled ? '开' : '关'}，提前 ${patch.eventsLeadMin} 分钟提醒，联网查时间表${patch.eventsSearch ? '允许' : '不查'}。`;
+          toast('事件设置存好了', 3000);
+        } catch (e) { if (box) box.textContent = '没存上：' + e.message; }
+        finally { x.disabled = false; }
+        return;
+      }
+      if (act === 'evScan') {
+        x.disabled = true;
+        const box = body.querySelector('#evBox');
+        try {
+          // 不带文字就让服务端扫最近一轮 QQ 对话
+          const r = await api('/api/events/scan', { method: 'POST', body: {} });
+          const added = (r && r.added) || [];
+          if (box) box.innerHTML = added.length
+            ? `认出 ${added.length} 件：<br>` + added.map(evRowHtml).join('')
+            : '这段里没有「将来某个时间要发生」的事。';
+          if (added.length) toast(`认出 ${added.length} 件事`, 3200);
+        } catch (e) { if (box) box.textContent = '没认出来：' + e.message; }
+        finally { x.disabled = false; }
+        return;
+      }
       if (act === 'napLoginSave') {
         // 只存密码（换 MD5），不尝试登录：在线时也能先把密码备好，被踢了才有得用
         x.disabled = true;
@@ -4872,6 +4916,20 @@ function qqBindText(q) {
   return `现在往「${conv.title}」里说（${conv.messages || 0} 条消息）——换一个会接着那个对话的历史继续说。`;
 }
 
+function evRowHtml(e) {
+  const at = (e && e.atText) ? esc(String(e.atText)) : (e && e.at ? esc(new Date(e.at).toLocaleString()) : '时间待定');
+  const note = e && e.note ? '（' + esc(String(e.note).slice(0, 60)) + '）' : '';
+  const flag = e && e.status && e.status !== 'open' ? ' [' + esc(String(e.status)) + ']' : '';
+  return `<div>· ${esc(String((e && e.title) || ''))} — ${at}${note}${flag}</div>`;
+}
+
+function evListHtml(r) {
+  const list = (r && r.events) || [];
+  if (!list.length) return '清单是空的：等对话里出现「明天 / 下周 / 某月某日要做什么」时会被认出来。';
+  const head = `开关：${r.enabled ? '开' : '关'} · 提前 ${esc(String(r.leadMin))} 分钟 · ${list.length} 件`;
+  return head + '<br>' + list.slice(-12).map(evRowHtml).join('');
+}
+
 function qqPageHtml() {
   const q = DAY.qq || {};
   const nap = DAY.napcat || {};
@@ -4893,6 +4951,21 @@ function qqPageHtml() {
         <button class="btn ghost" data-x="napHealNow" title="立刻跑一轮自检：缺 OneBot 配置就补、登录态坏了就重置并提示重扫">自动纠错</button>
       </div>
       <div class="tip" id="napHealBox" style="margin-top:8px">自动纠错：每 90 秒一轮，也可以在按钮上手动跑。</div>
+      <h4 style="margin-top:18px">事件提醒（从对话里认事，到点前发一条）</h4>
+      <p class="tip" style="margin:2px 0 10px">每轮 QQ 对话结束后顺手看一句「有没有将来要发生的事」，认出来就记下（只记标题和时间，不存原文）；到点前在 QQ 上发一条提醒。没有具体时间的不算事件；时间不够明确就去网上查一次，查不到就留空，不编。</p>
+      <div class="qq-form">
+        <div class="field"><label>总开关</label><select id="evEnabled"><option value="1">开</option><option value="0">关</option></select></div>
+        <div class="field"><label>每轮对话后自动抽</label><select id="evAuto"><option value="1">开</option><option value="0">关</option></select></div>
+        <div class="field"><label>提前几分钟提醒</label><input id="evLead" type="number" min="0" max="1440" value="${esc(String((DAY.events && DAY.events.leadMin) ?? 10))}"></div>
+        <div class="field"><label>允许联网查时间表</label><select id="evSearch"><option value="1">允许</option><option value="0">不查</option></select></div>
+      </div>
+      <div class="cal-form-foot" style="margin-top:10px">
+        <button class="btn primary" data-x="evSave">保存事件设置</button>
+        <button class="btn" data-x="evScan" title="扫最近一轮 QQ 对话，看里面有没有将来要发生的事">从对话里找事件</button>
+        <button class="btn ghost" data-x="evRefresh">刷新清单</button>
+        <button class="btn ghost" data-x="evTick" title="立刻检查一次有没有快到点的（到点就真发 QQ）">查一遍</button>
+      </div>
+      <div class="tip" id="evBox" style="margin-top:8px">还没读事件清单，点「刷新清单」。</div>
       <h4 style="margin-top:18px">登录（快速登录 / 账号密码）</h4>
       <p class="tip" style="margin:2px 0 10px">密码只在这一步换成 MD5 发给本机 NapCat（WebUI 6209），落盘也只存 MD5、不存明文。被踢下线后会自动先试快速登录、再试存下来的密码，都不成才要你扫码。</p>
       <div id="napLoginInfo" class="tip">还没读登录状态，点一下「刷新可登录账号」。</div>

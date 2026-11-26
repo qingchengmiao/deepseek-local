@@ -22,6 +22,8 @@ import net from 'node:net';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { spawn, execFile, execFileSync } from 'node:child_process';
+import { createPipeline, qqStages } from './qq-pipeline.mjs';
+import { createEvents } from './events.mjs';
 import { promisify } from 'node:util';
 import {
   CTX_DEFAULTS,
@@ -565,6 +567,11 @@ const DEFAULT_SETTINGS = {
   napcatWsPort: 3201,
   napcatWebuiPort: 6209,
   napcatAutoHeal: true, // 90 秒一轮自检：缺 OneBot 配置就补、登录态坏了就重置并提示重扫
+  // ---- 事件：从对话里认出「将来会发生的事」，到点前主动发一条（本体在 events.mjs）
+  eventsEnabled: true, // 总开关
+  eventsAutoScan: true, // 每轮 QQ 对话结束后顺手抽一次
+  eventsLeadMin: 10, // 提前几分钟提醒
+  eventsSearch: true, // 允许联网查事件时间表（只查关键词，不发对话原文）
   // ---- 推送：允许应用主动往 QQ 推消息（一道权限门，关掉后推送接口一律 403）
   pushEnabled: true,
   pushUid: '', // 推给谁；空 = 回落到 qqUid
@@ -819,6 +826,8 @@ async function saveSettings(patch) {
   const next = { ...cur };
   for (const [k, v] of Object.entries(patch || {})) {
     if (!(k in DEFAULT_SETTINGS)) continue;
+    if (k === 'eventsEnabled' || k === 'eventsAutoScan' || k === 'eventsSearch') { next[k] = !!v; continue; }
+    if (k === 'eventsLeadMin') { next[k] = Math.max(0, Math.min(1440, Math.floor(Number(v) || 0))); continue; }
     if (k === 'apiKey') next.apiKey = String(v || '').trim();
     else if (k === 'baseUrl') next.baseUrl = String(v || '').trim() || DEFAULT_SETTINGS.baseUrl;
     else if (k === 'temperature') next.temperature = Math.min(2, Math.max(0, Number(v) || 0));
@@ -1452,7 +1461,114 @@ async function qqPollOnce({ reply = true } = {}) {
 
 /** 收到一批「对方发来的」消息后的统一处理：去重 → 记 seen → 只发不回就只记库 → 否则一条一回。
  *  轮询（qqPollOnce）和事件推送（WS）走同一条路，保证延迟不同但行为一致。 */
+// ---- 事件系统：从对话里认出「将来会发生的事」，到点前主动发一条（本体在 events.mjs）
+let eventsCache = null;
+function eventsApi() {
+  if (!eventsCache) {
+    eventsCache = createEvents({
+      dataDir: DATA,
+      // 抽取只认本机 gguf：不花 API 钱，也不把别人说的话发出去
+      askModel: async ({ system, user }) => {
+        const settings = await loadSettings();
+        const r = await localChat(settings, { system, user, maxTokens: 500 });
+        return { text: r.text };
+      },
+      sendText: (text) => qqSendText(text),
+      appendToConv: async (convId, text) => {
+        if (!convId) return;
+        const conv = await loadConversation(convId).catch(() => null);
+        if (!conv) return;
+        conv.messages.push(newMessage('assistant', text));
+        conv.updatedAt = now();
+        await saveConversation(conv);
+      },
+      convText: async (convId, { limit = 40 } = {}) => {
+        const conv = await loadConversation(convId).catch(() => null);
+        if (!conv) return '';
+        return conv.messages.slice(-limit)
+          .map(m => (m.role === 'user' ? '对方' : '我') + '：' + String(m.content || '').slice(0, 300))
+          .join('\n');
+      },
+      settingsOf: () => loadSettings(),
+      log,
+    });
+  }
+  return eventsCache;
+}
+
+// 一轮对话结束后顺手看看里面有没有「将来要发生的事」。不阻塞回复，失败只记一行日志。
+async function eventsAutoScan(conv, items) {
+  try {
+    const settings = await loadSettings();
+    if (settings.eventsEnabled === false || settings.eventsAutoScan === false) return;
+    const text = (items || [])
+      .map(it => `${it.nick || it.uid || ''}：${it.text || ''}`)
+      .join('\n').trim();
+    if (!text) return;
+    const added = await eventsApi().extractFromText(text, { convId: (conv && conv.id) || '' });
+    if (added && added.length) log(`[事件] 从这句话里认出 ${added.length} 件：${added.map(e => e.title).join(' / ')}`);
+  } catch (e) { log('[事件] 自动抽取失败：' + e.message); }
+}
+
+let eventsTimer = null;
+function startEventsLoop() {
+  if (eventsTimer) return;
+  try {
+    eventsApi().startScheduler(30e3);
+    eventsTimer = true;
+    log('[事件] 调度器已启动（30 秒一轮）');
+  } catch (e) { log('[事件] 调度器没起来：' + e.message); }
+}
+function stopEventsLoop() {
+  try { if (eventsCache) eventsCache.stopScheduler(); } catch {}
+  eventsTimer = null;
+}
+
+// ---- QQ 消息处理：一条消息从「收到」到「回完」被拆成有序阶段（qq-pipeline.mjs）。
+// 轮询和 WS 事件推送都走这条路，行为才一致；每个阶段的耗时记在返回值的 trace 里。
+let qqPipelineCache = null;
+function qqPipeline() {
+  if (qqPipelineCache) return qqPipelineCache;
+  qqPipelineCache = createPipeline(qqStages({
+    state: qqState,
+    pickNew,
+    saveQqSeen,
+    qqRemember,
+    qqConversation,
+    qqImageAttachments,
+    qqUserPrompt,
+    chatOnce,
+    qqSemanticParts,
+    qqSendText,
+    newMessage,
+    saveConversation,
+    sleep,
+    now,
+    log,
+    onConversation: ({ conv, items }) => { eventsAutoScan(conv, items); },
+  }));
+  return qqPipelineCache;
+}
+
 async function qqProcessItems(list, { reply = true, settings, cfg } = {}) {
+  const ctx = { list, reply: !!reply, settings, cfg, t0: now(), outs: [], trace: [] };
+  try {
+    await qqPipeline()(ctx);
+  } catch (e) {
+    qqState.lastError = '回复失败：' + e.message;
+    qqRemember({ dir: 'error', text: e.message });
+  }
+  return {
+    fresh: Array.isArray(ctx.usable) ? ctx.usable.length : 0,
+    replied: (ctx.outs || []).length,
+    outs: ctx.outs || [],
+    ms: now() - ctx.t0,
+    trace: ctx.trace || [],
+  };
+}
+
+// 旧实现留在这里做对照：阶段表跑通、对比过 trace 之后可以删。
+async function qqProcessItemsLegacy(list, { reply = true, settings, cfg } = {}) {
   const t0 = now();
   const { fresh, seen } = pickNew(list, qqState.seen);
   if (seen.length !== qqState.seen.length) {
@@ -6242,6 +6358,14 @@ async function handleApi(req, res, url) {
     return sendJson(res, 200, { ok: napcatForgetLogin() });
   }
 
+  // 事件：认事件、查时间表、到点提醒。逻辑全在 events.mjs，这里只转发。
+  if (pathname === '/api/events' || pathname.startsWith('/api/events/')) {
+    let body = {};
+    if (method === 'POST') body = (await readBody(req)) || {};
+    const handled = await eventsApi().handle({ pathname, method, body, settings: await loadSettings() });
+    if (handled) return sendJson(res, handled.status || 200, handled.json);
+  }
+
   // 推送：允许应用主动往 QQ 推一条（权限门 pushEnabled）
   if (pathname === '/api/push' && method === 'POST') {
     const body = await readBody(req) || {};
@@ -7012,6 +7136,7 @@ startQQBridge();
 startQqEvents();
   startHealLoop(); // 隔离实例的自动纠错（90 秒一轮，设置里 napcatAutoHeal 可关）
   startLearnLoop(); // 群聊自学习：10 分钟抽一轮、跨周自动结算（设置里 learnAuto 可关）
+  startEventsLoop(); // 事件提醒：30 秒一轮看有没有快到点的事（设置里 eventsEnabled 可关）
 startVectorLoop(); // 检索索引：启动 8 秒后后台建一次，之后每 5 分钟增量刷（只重算改过的会话）
 
   const shutdown = async () => {
@@ -7019,6 +7144,7 @@ startVectorLoop(); // 检索索引：启动 8 秒后后台建一次，之后每 
 stopQQBridge();
   stopQqEvents();
     stopLearnLoop();
+    stopEventsLoop();
     server.close();
     try { await fsp.unlink(RUNTIME_FILE); } catch {}
     setTimeout(() => process.exit(0), 300).unref();

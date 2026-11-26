@@ -315,8 +315,40 @@ export async function disposeAll() {
   runtime = null;
 }
 
+/**
+ * 能力枚举：把「这台机器现在能干什么」摊平成一张表，别让调用方靠「有没有报错」猜。
+ * 以后接 STT / TTS / 重排，只是往这张表里加一个键，上层不用改判断逻辑。
+ */
+export const CAPS = {
+  CHAT: 'chat',
+  EMBED: 'embed',
+  RERANK: 'rerank',
+  STT: 'stt',
+  TTS: 'tts',
+};
+
+/** 列一遍各能力现在能不能用；不可用的给出原因（不是抛异常） */
+export function capabilities() {
+  const models = listModels();
+  const chatPath = resolveModelPath('');
+  const embedPath = resolveEmbedModelPath('');
+  const out = {};
+  out[CAPS.CHAT] = chatPath ? { ok: true, model: path.basename(chatPath) } : { ok: false, reason: models.length ? '没有非向量 gguf' : '模型目录里没有 gguf' };
+  out[CAPS.EMBED] = embedPath ? { ok: true, model: path.basename(embedPath) } : { ok: false, reason: '没有向量模型（名字带 embed/bge/gte/minilm/rerank）' };
+  out[CAPS.RERANK] = { ok: false, reason: '还没接重排模型' };
+  out[CAPS.STT] = { ok: false, reason: '还没接语音识别' };
+  out[CAPS.TTS] = { ok: false, reason: '还没接语音合成' };
+  return out;
+}
+
+/** 只要布尔值的一道快问：上层决定走本机还是走 API 时用 */
+export function hasCap(name) {
+  const c = capabilities()[name];
+  return !!(c && c.ok);
+}
+
 export default {
   setRootDir, binsDir, findCudaRuntime, prepareDllPath, detectBackend, preparedPaths,
   setModelDir, getModelDir, listModels, resolveModelPath, resolveEmbedModelPath,
-  chat, embed, status, disposeAll,
+  chat, embed, status, disposeAll, capabilities, hasCap, CAPS,
 };
