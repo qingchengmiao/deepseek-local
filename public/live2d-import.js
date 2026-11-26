@@ -205,7 +205,7 @@
     app.renderer.resize(w, h);
     var mw = model.internalModel.width || model.width || 1;
     var mh = model.internalModel.height || model.height || 1;
-    var scale = Math.min((w / mw) * 1.35, h / mh) * 0.98;
+    var scale = Math.min(w / mw, h / mh) * 0.98;
     model.scale.set(scale);
     model.anchor.set(0.5, 1);
     model.position.set(w / 2, h);
@@ -332,7 +332,7 @@
 
   // 随包带的默认模型：现在留空 —— 开机就是原来的静态图，要点 L2D 自己选目录才会换。
   // 以后拿到定稿的三视图、用 PSD2Live 转好模型，把路径填回这里就会自动加载。
-  var DEFAULT_MODEL = '/assets/live2d/models/dsniang4/dsniang4.model3.json';
+  var DEFAULT_MODEL = '/assets/live2d/models/dsniang8c/dsniang8c.model3.json';
 
   function attach(model) {
     state.app.stage.removeChildren();

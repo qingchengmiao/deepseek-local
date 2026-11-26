@@ -1291,11 +1291,15 @@ html[data-theme="dark"] .msg-actions { opacity: .42; }
 
 /* Live2D 吉祥物：矩形画布，比静态图占位更大 */
 .mascot.l2d-on {
-  width: 340px;
-  height: 330px;
-  right: 10px;
-  bottom: 4px;
+  width: 300px;
+  height: 360px;
+  right: 8px;
+  bottom: 8px;
   background: transparent;
+  border: 0;
+  outline: 0;
+  box-shadow: none;
+  overflow: visible;
   pointer-events: none;
 }
 .mascot.l2d-on .mascot-l2d { inset: 0; }
