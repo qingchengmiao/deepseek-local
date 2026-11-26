@@ -5021,7 +5021,19 @@ function qqLiveHtml() {
   const qrMeta = qrSeen
     ? `更新于 ${new Date(qrSeen.at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })} · ${qrSeen.count > 1 ? `第 ${qrSeen.count} 次刷新` : '首次读到的码'} · 约每 ${Math.round(DAY.qrAutoMs / 1000)} 秒自动刷新（<span id="qqQrCount">--:--</span>）`
     : '';
-  const qrBlock = login ? `
+  // 掉线优先：NapCat 仍报 login.ok=true，所以不能只看 login 去渲染「登录状态」这张卡
+  const qrBlock = dropped ? `
+      <div class="card-block"><h4>登录状态 <span class="pill warn">掉线了</span></h4>
+        <div class="kv"><span>账号</span><span>${esc((nap.login && nap.login.nick) || '')}（${esc((nap.login && nap.login.uid) || '')}）· 掉线前登录过</span>
+        <span>后端</span><span>${esc(nap.dir || '')} · 端口 ${esc(String(nap.port || ''))}</span>
+        <span>掉线于</span><span>${esc(new Date(QQW.lostAt).toLocaleTimeString('zh-CN'))}${QQW.why ? ' · ' + esc(QQW.why) : ''}</span></div>
+        <div class="warn" style="margin-top:8px">NapCat 进程还在、也还说自己登录着，但发不出消息了（账号被踢或网络断了）。先「自动纠错」，不行就「重启 NapCat 出新码」再扫一次。</div>
+        <div class="qq-acts" style="margin-top:10px">
+          <button class="btn primary" data-x="napHealNow" title="立刻跑一轮自检：缺 OneBot 配置就补、登录态坏了就重置并提示重扫">自动纠错</button>
+          <button class="mini" data-x="napRestart" title="杀掉 NapCat 再重跑启动脚本，逼它出一张新码（会断开当前登录）">重启 NapCat 出新码</button>
+          <button class="mini" data-x="qqTest">测试连接</button>
+        </div>
+      </div>` : login ? `
       <div class="card-block"><h4>登录状态</h4>
         <div class="kv"><span>账号</span><span>${esc(nap.login.nick || '')}（${esc(nap.login.uid || '')}）</span>
         <span>后端</span><span>${esc(nap.dir || '')} · 端口 ${esc(String(nap.port || ''))}</span></div>
