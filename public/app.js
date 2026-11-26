@@ -3586,11 +3586,12 @@ async function qqAlive(nap) {
     const j = await r.json().catch(() => ({}));
     if (j && j.status === 'ok' && j.data) return { ok: true, why: '' };
     const m = String((j && (j.message || j.wording)) || '');
-    return {
-      ok: false,
-      why: /1006514|网络连接异常/.test(m) ? '网络连接异常（1006514）'
-        : m ? m.slice(0, 80) : ('retcode ' + (j && j.retcode) + ' / ' + (j && j.status)),
-    };
+    // 掉线时 NapCat 回的东西不固定（1006514「网络连接异常」/ coreInfo 空指针 / 超时），
+    // 只要不是 ok+data 就一律当成「连不上 QQ 服务器」，原始文案留在括号里方便排查
+    const why = /1006514|网络连接异常/.test(m) ? '网络连接异常（1006514）'
+      : /coreInfo/.test(m) ? 'QQ 客户端连接已断'
+        : '连不上 QQ 服务器（' + (m ? m.slice(0, 60) : 'retcode ' + (j && j.retcode)) + '）';
+    return { ok: false, why };
   } catch (e) {
     clearTimeout(kill);
     return { ok: false, why: (e && e.name === 'AbortError') ? 'QQ 服务器没应答（5 秒超时）' : '请求 QQ 服务器失败' };
