@@ -85,12 +85,14 @@ export function createDiary({ dataDir, log = () => {}, chat, settingsOf, recentT
   function cleanJournal(raw) {
     const lines = String(raw || '')
       .split(/\r?\n/)
-      .map(s => s.replace(/^\s*[-*·•]\s*/, '').replace(/^#+\s*/, '').trim())
+      .map(s => s.replace(/^\s*[-*·•]\s*/, '').replace(/^#+\s*/, '').replace(/^\d+[.、)）]\s*/, '').trim())
       .filter(Boolean);
     const seen = new Set();
     const out = [];
     for (const line of lines) {
       if (line.length < 4) continue;
+      // 「今天的工作日志：」这种装饰性抬头丢掉
+      if (line.length <= 14 && /[：:]$/.test(line)) continue;
       const key = line.replace(/\s/g, '');
       if (seen.has(key)) continue;
       seen.add(key);
