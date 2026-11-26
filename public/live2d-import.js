@@ -475,15 +475,16 @@
   function markButton() {
     var btn = state.btn;
     if (!btn) return;
+    // 图标按钮：只在圆环颜色上体现状态，不写字。
     var map = {
-      idle: ['L2D', 'rgba(150,170,200,.75)', '点我导入 Live2D 模型（右键清除）'],
-      loading: ['L2D…', 'rgba(230,200,120,.9)', '正在装 Live2D 运行时…'],
-      ok: ['L2D OK', 'rgba(110,220,150,.9)', '点我导入 Live2D 模型（运行时已就绪，右键清除）'],
-      err: ['L2D X', 'rgba(240,120,140,.9)', 'Live2D 运行时没装上（点我看提示）']
+      idle: ['rgba(150,170,200,.55)', .62, '点我导入 Live2D 模型（右键清除）'],
+      loading: ['rgba(230,200,120,.9)', 1, '正在装 Live2D 运行时…'],
+      ok: ['rgba(110,220,150,.9)', 1, '点我导入 Live2D 模型（运行时已就绪，右键清除）'],
+      err: ['rgba(240,120,140,.9)', 1, 'Live2D 运行时没装上（点我看提示）']
     };
     var cfg = map[state.runtime] || map.idle;
-    btn.textContent = cfg[0];
-    btn.style.borderColor = cfg[1];
+    btn.style.borderColor = cfg[0];
+    btn.style.opacity = String(cfg[1]);
     btn.title = cfg[2] + (state.current ? '\n当前：' + state.current.name : '');
   }
 
@@ -496,11 +497,20 @@
     var btn = document.createElement('button');
     btn.type = 'button';
     btn.id = 'mascotL2DBtn';
-    btn.className = 'mascot-l2d-btn';
-    btn.style.cssText = 'position:fixed;left:auto;right:206px;bottom:26px;width:58px;height:26px;'
-      + 'z-index:2147483000;opacity:1;border:1px solid rgba(150,170,200,.9);border-radius:6px;'
-      + 'background:rgba(20,26,38,.88);color:#cfe6ff;font:600 12px/24px -apple-system,"Segoe UI",sans-serif;'
-      + 'letter-spacing:.5px;cursor:pointer;padding:0;pointer-events:auto;box-shadow:0 2px 8px rgba(0,0,0,.25)';
+    btn.className = 'mascot-l2d-icon';
+    // 贴在吉祥物右上角：静态图是 right:18 bottom:18 的 176px 方块，所以图标落在
+    // right:18 bottom:198 正好是它的右上外角。想挪到窗口角落就改这两个数。
+    btn.style.cssText = 'position:fixed;left:auto;right:18px;bottom:198px;width:22px;height:22px;'
+      + 'z-index:2147483000;opacity:.62;border:1px solid rgba(150,170,200,.55);border-radius:50%;'
+      + 'background:rgba(20,26,38,.72);color:#cfe6ff;line-height:0;cursor:pointer;padding:0;'
+      + 'pointer-events:auto;box-shadow:0 1px 4px rgba(0,0,0,.28);transition:opacity .15s,border-color .15s';
+    btn.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" '
+      + 'stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+      + '<path d="M12 3c4.4 0 8 3.2 8 7.2 0 4-3.6 7.2-8 7.2-1.2 0-2.4-.2-3.4-.7"/>'
+      + '<path d="M8.6 16.7 6 21l1.7-4.9"/><circle cx="15" cy="9" r="1.1" fill="currentColor" stroke="none"/>'
+      + '</svg>';
+    btn.addEventListener('mouseenter', function () { btn.style.opacity = '1'; });
+    btn.addEventListener('mouseleave', function () { markButton(); });
     btn.addEventListener('click', function (e) {
       e.preventDefault();
       e.stopPropagation();
@@ -524,9 +534,9 @@
   function boot() {
     // 按钮不依赖 #mascot：有 body 就装得上。
     if (!document.body) return false;
-    // 静态模式：不建按钮、不加载运行时、不还原已存模型，吉祥物就是那张静态图。
-    if (!DEFAULT_MODEL) return true;
+    // 静态模式下这个图标照样在：点它才装运行时、选文件夹。
     ensureButton();
+    if (!DEFAULT_MODEL) return true;
     ensureRuntime()
       .then(function () { markButton(); return restore(); })
       .then(function () { return mountDefault(); })
