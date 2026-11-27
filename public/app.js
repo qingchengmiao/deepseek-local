@@ -4343,6 +4343,35 @@ async function openQqPage() {
         }
         return;
       }
+      if (act === 'napOneQr') {
+        // 一个按钮干完：手上码还新就直接用；不新先刷新；再不行清旧进程、只起一代、等新码。
+        // 逻辑全在服务端（/api/napcat/qr/oneclick），前端只负责别让人再点第二个按钮。
+        const old = x.textContent;
+        x.disabled = true;
+        x.textContent = '正在出码…（最多两三分钟）';
+        toast('一键出码：先看手上这张还新不新，不新就刷新，救不回来再清旧进程重开一代。先别关窗口。', 6000);
+        try {
+          const r = await api('/api/napcat/qr/oneclick', { method: 'POST', body: {} })
+            .catch(e => ({ ok: false, error: String(e.message || e) }));
+          if (r && r.ok && r.qr) {
+            DAY.napcat = { ...(DAY.napcat || {}), qr: r.qr };
+            DAY.qrSeen = { hash: r.qr.hash, at: r.qr.servedAt || Date.now(), count: (DAY.qrSeen ? DAY.qrSeen.count + 1 : 1) };
+            QQW.ok = true; QQW.lostAt = 0; QQW.fail = 0;
+            const secs = Math.round((r.waitedMs || 0) / 1000);
+            toast(r.reused ? `这张码还用得上（${secs} 秒），扫它` : `新码出来了（等了 ${secs} 秒），扫这个`, 7000);
+            await paintShell();
+            DAY.qrNextAt = Date.now() + DAY.qrAutoMs;
+          } else if (r && r.ok && r.loggedIn) {
+            toast('QQ 已经登录着，不用扫', 4000);
+            await paintShell();
+          } else {
+            const killed = (r && r.killed && r.killed.length) ? `清掉 ${r.killed.length} 个旧进程；` : '';
+            toast(killed + '没出码：' + ((r && r.error) || '再点一次'), 9000);
+            await paintShell();
+          }
+        } finally { x.disabled = false; x.textContent = old; }
+        return;
+      }
       if (act === 'napNewQr') {
         const old = x.textContent;
         x.disabled = true;
@@ -5327,8 +5356,7 @@ function qqLiveHtml() {
         <span>掉线于</span><span>${esc(new Date(QQW.lostAt).toLocaleTimeString('zh-CN'))}${QQW.why ? ' · ' + esc(QQW.why) : ''}</span></div>
         <div class="warn" style="margin-top:8px">被踢了。NapCat 进程还在、也还说自己登录着，但消息已经发不出去了（账号被踢或网络断了）。点「重启 NapCat 出新码」，手机扫一下就回来——别等它自己好，它好不了。</div>
         <div class="qq-acts" style="margin-top:10px">
-          <button class="btn primary" data-x="napRestart" title="杀掉 NapCat 再重跑启动脚本，逼它出一张新码（会断开当前登录）">重启 NapCat 出新码</button>
-          <button class="mini" data-x="napHealNow" title="补 OneBot 配置、按需重置登录态">自检修一下</button>
+          <button class="btn primary" data-x="napOneQr" title="一键：有旧进程先杀干净，上一代崩过就换登录档案，只起一代 NapCat，然后等新码。你只负责扫。">一键出新码（自动清旧进程）</button>
           <button class="mini" data-x="qqTest">测试连接</button>
         </div>
       </div>` : login ? `
@@ -5351,17 +5379,14 @@ function qqLiveHtml() {
           ${qrMeta ? `<div class="muted" id="qqQrMeta">${qrMeta}</div>` : ''}
         </div>
         <div class="qq-acts qr-acts" style="margin-top:10px">
-          <button class="btn primary" data-x="napNewQr" title="让 NapCat 重出一张码。不重启、不换登录档案，等你扫">换一张新码（不重启）</button>
-          <button class="mini" data-x="napRefresh">刷新二维码</button>
-          <button class="mini" data-x="qqQrForce" title="停掉 NapCat 再拉起来，逼它出一张新码（会断开当前登录）">强制出新码</button>
+          <button class="btn primary" data-x="napOneQr" title="一键：手上这张还新就直接给你；不新就先敲一次刷新；再不行就杀干净重开一代。你只负责扫。">一键出新码</button>
           <button class="mini" data-x="qqTest">检查是否已登录</button>
         </div>
       </div>` : `
       <div class="card-block"><h4>扫码登录</h4>
-        <div class="sub">还没拿到二维码。先点「启动 NapCat」，等它把码刷出来（Shell 在 ${esc(nap.dir || 'DSL 自带的那个目录')}），出码后点「刷新二维码」。</div>
+        <div class="sub">还没拿到二维码。点下面那个按钮，它会把旧进程清掉、起一代 NapCat、一直等到码出来（Shell 在 ${esc(nap.dir || 'DSL 自带的那个目录')}）。</div>
         <div class="qq-acts" style="margin-top:10px">
-          <button class="btn primary" data-x="napStart">启动 NapCat</button>
-          <button class="mini" data-x="napRefresh">刷新二维码</button>
+          <button class="btn primary" data-x="napOneQr" title="一键：清旧进程 → 起一代 NapCat → 等到新码">一键出码（自动启动）</button>
         </div>
       </div>`;
   return `

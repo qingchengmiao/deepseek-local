@@ -2300,6 +2300,98 @@ async function napcatForceNewQr(settings, { waitMs = 300000 } = {}) {
   return out;
 }
 
+/**
+ * 一键出码（2026-11-27 用户要求：别让人在五个按钮之间猜，也别一点就干等）。
+ * 顺序固定，能省就省：
+ *   ① 已经登录                → 直接说「不用扫」，一个进程都不动；
+ *   ② 磁盘上那张码还够新（<100 秒）→ 秒回，同样不动进程；
+ *   ③ WebUI 通着             → 敲一次 RefreshQRcode，8 秒换到就用（最快，不重启）；
+ *   ④ 上面都不行             → 清干净所有残留（含僵尸 NapCatWinBootMain 和它拉的 QQ）→
+ *                              上一代崩过（QQNT.dll 0x80000003）就换一份登录档案 →
+ *                              只起一代 → 等新码。
+ * 第 ④ 步是 21:54 那种「僵尸世代」唯一的出路：QQ 内核已经死了、NapCat 那层还活着，
+ * 光刷新永远报错，必须整代换掉。
+ */
+async function napcatOneClickQr(settings, { waitMs = 150000 } = {}) {
+  const s = settings || (await loadSettings());
+  const t0 = Date.now();
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const out = {
+    ok: false, changed: false, loggedIn: false, reused: false,
+    waitedMs: 0, qr: null, error: '', steps: [], killed: [], rotated: null, crash: null,
+  };
+  const step = (t) => out.steps.push({ t, atMs: Date.now() - t0 });
+
+  const st0 = await napcatHostState(s).catch(() => null);
+  if (st0 && st0.loggedIn) {
+    out.ok = true; out.loggedIn = true; out.waitedMs = Date.now() - t0;
+    out.message = 'QQ 已经登录着，不用扫';
+    step('已经登录，什么都不用做');
+    return out;
+  }
+
+  const q0 = await napcatQrOnly(s).catch(() => null);
+  const beforeHash = (q0 && q0.qr && q0.qr.hash) || '';
+  const age0 = q0 && q0.qr ? Date.now() - Number(q0.qr.mtime || 0) : Infinity;
+  if (q0 && q0.qr && age0 < 100000) {
+    out.ok = true; out.reused = true; out.qr = q0.qr; out.waitedMs = Date.now() - t0;
+    out.message = `手上这张码 ${Math.round(age0 / 1000)} 秒前刚出的，直接用`;
+    step(out.message);
+    return out;
+  }
+
+  // ③ 快路：敲一次刷新（不重启）。NapCat 活着且没被踢时，这一步就够了。
+  const ref = await napcatRefreshQr(s, { waitMs: 8000 }).catch((e) => ({ ok: false, error: e.message }));
+  if (ref && ref.ok && ref.qr) {
+    out.ok = true; out.changed = true; out.qr = ref.qr; out.waitedMs = Date.now() - t0;
+    step('敲了一次刷新，码换新了（没重启）');
+    return out;
+  }
+
+  // ④ 慢路：整代换掉。先看清上一代是不是崩了，崩了就顺手把登录档案也换掉。
+  out.crash = await recentQqCrash(30).catch(() => null);
+  for (let i = 0; i < 5; i++) {
+    const k = await napcatKillResidualTree().catch(() => []);
+    if (k && k.length) out.killed.push(...k);
+    await sleep(700);
+    if (!k || !k.length) break;
+  }
+  step(out.killed.length ? `清掉 ${out.killed.length} 个旧进程` : '没有旧进程要清');
+  if (out.crash) {
+    out.rotated = await rotateLoginProfile(s).catch(() => null);
+    if (out.rotated && out.rotated.ok) step('上一代崩在 QQNT.dll，换了一份登录档案');
+  }
+  // 用户亲手点的一键出码之后，之前攒下的「刷新失败」账不再算数
+  // （不然界面上会一直挂着「刷新一直失败」这句错的提示）。
+  loginKeeper.fails = 0; loginKeeper.lastError = '';
+  await sleep(1500);
+  const started = await napcatHostRun(s, 'start').catch((e) => ({ ok: false, error: e.message }));
+  if (started && started.ok === false && !started.alreadyRunning) {
+    out.waitedMs = Date.now() - t0;
+    out.error = '起不来 NapCat：' + (started.error || started.message || '原因不明');
+    return out;
+  }
+  step('只起了一代 NapCat，等它出码');
+
+  const deadline = t0 + Math.max(30000, Number(waitMs) || 0);
+  let cur = null;
+  while (Date.now() < deadline) {
+    await sleep(1500);
+    cur = await napcatQrOnly(s).catch(() => null);
+    const h = cur && cur.qr && cur.qr.hash;
+    if (h && h !== beforeHash) break;
+    cur = null;
+  }
+  out.waitedMs = Date.now() - t0;
+  if (cur && cur.qr) {
+    out.ok = true; out.changed = true; out.qr = cur.qr;
+    step('新码出来了');
+    return out;
+  }
+  out.error = `清干净、重新起了一代，但 ${Math.round(out.waitedMs / 1000)} 秒内没出新码`;
+  return out;
+}
+
 async function startNapcat(settings) {
   const dir = napcatShellRoot(settings);
   const launcher = napcatLauncher(dir);
@@ -2723,6 +2815,9 @@ async function napcatHostRun(settings, verb, extraArgs = []) {
     try {
       await spawnHiddenConsole(exe0, ['start', ...startArgs], { cwd: path.dirname(exe0) });
       napcatLastStartAt = Date.now();
+      // 新一代起来了，之前攒下的「刷新失败」账不再算数：否则界面会一直挂着
+      // 「刷新一直失败，它会自动重启」这句错提示（22:01 手工单代重启后复现过）。
+      loginKeeper.fails = 0; loginKeeper.lastError = '';
     } catch (e) {
       return { ok: false, verb, error: String((e && e.message) || e), exe: exe0 };
     }
@@ -7144,6 +7239,23 @@ async function handleApi(req, res, url) {
       return sendJson(res, 200, await napcatNewQrForHuman(await loadSettings()));
     } catch (e) {
       evLog('napcat', 'error', '换新码：抛错了', e.message).catch(() => {});
+      return sendJson(res, 400, { ok: false, error: qqWhyText(e.message) });
+    }
+  }
+
+  // 一键出码：界面上那一个主按钮打到这里。杀旧进程、按需换登录档案、只起一代、等新码，
+  // 全在服务端一次做完，前端不用连着点五个按钮。
+  if (pathname === '/api/napcat/qr/oneclick' && method === 'POST') {
+    try {
+      const r = await napcatOneClickQr(await loadSettings());
+      await evLog('napcat', r.ok ? 'info' : 'warn', r.ok ? '一键出码：成了' : '一键出码：没成', {
+        reused: r.reused, loggedIn: r.loggedIn, changed: r.changed,
+        waitedMs: r.waitedMs, killed: r.killed, rotated: !!(r.rotated && r.rotated.ok),
+        crash: r.crash ? r.crash.code : '', error: r.error, steps: r.steps,
+      }).catch(() => {});
+      return sendJson(res, 200, r);
+    } catch (e) {
+      await evLog('napcat', 'error', '一键出码：抛错了', e.message).catch(() => {});
       return sendJson(res, 400, { ok: false, error: qqWhyText(e.message) });
     }
   }
