@@ -2330,22 +2330,33 @@ async function napcatOneClickQr(settings, { waitMs = 150000 } = {}) {
     return out;
   }
 
+  // 2026-11-27 22:13 实测踩到的坑：NapCat 一个进程都不在了，磁盘上那张码却还是
+  // 「两分钟前刚出」的新鲜状态（keeper 在被杀之前刚换过），于是这里直接把它当成品交出去，
+  // 用户扫进去什么也不会发生。码新不新只是必要条件，**背后得有一代在跑**。
+  const alive0 = !!(st0 && st0.ok !== false &&
+    ((Number(st0.processCount) || 0) > 0 || (Array.isArray(st0.pids) && st0.pids.length)));
+
   const q0 = await napcatQrOnly(s).catch(() => null);
   const beforeHash = (q0 && q0.qr && q0.qr.hash) || '';
   const age0 = q0 && q0.qr ? Date.now() - Number(q0.qr.mtime || 0) : Infinity;
-  if (q0 && q0.qr && age0 < 100000) {
+  if (alive0 && q0 && q0.qr && age0 < 100000) {
     out.ok = true; out.reused = true; out.qr = q0.qr; out.waitedMs = Date.now() - t0;
     out.message = `手上这张码 ${Math.round(age0 / 1000)} 秒前刚出的，直接用`;
     step(out.message);
     return out;
   }
+  if (!alive0 && q0 && q0.qr && age0 < 100000) step('磁盘上的码看着新，但 NapCat 已经没了，过期资料不算数');
 
   // ③ 快路：敲一次刷新（不重启）。NapCat 活着且没被踢时，这一步就够了。
-  const ref = await napcatRefreshQr(s, { waitMs: 8000 }).catch((e) => ({ ok: false, error: e.message }));
-  if (ref && ref.ok && ref.qr) {
-    out.ok = true; out.changed = true; out.qr = ref.qr; out.waitedMs = Date.now() - t0;
-    step('敲了一次刷新，码换新了（没重启）');
-    return out;
+  if (alive0) {
+    const ref = await napcatRefreshQr(s, { waitMs: 8000 }).catch((e) => ({ ok: false, error: e.message }));
+    if (ref && ref.ok && ref.qr) {
+      out.ok = true; out.changed = true; out.qr = ref.qr; out.waitedMs = Date.now() - t0;
+      step('敲了一次刷新，码换新了（没重启）');
+      return out;
+    }
+  } else {
+    step('NapCat 没在跑，跳过刷新，直接重开一代');
   }
 
   // ④ 慢路：整代换掉。先看清上一代是不是崩了，崩了就顺手把登录档案也换掉。
@@ -2359,7 +2370,15 @@ async function napcatOneClickQr(settings, { waitMs = 150000 } = {}) {
   step(out.killed.length ? `清掉 ${out.killed.length} 个旧进程` : '没有旧进程要清');
   if (out.crash) {
     out.rotated = await rotateLoginProfile(s).catch(() => null);
-    if (out.rotated && out.rotated.ok) step('上一代崩在 QQNT.dll，换了一份登录档案');
+    if (out.rotated && out.rotated.ok) {
+      // 一定要把新目录传给下一次 start：旧的被占/被崩坏时，只用默认目录等于白换。
+      napcatLoginOverride = out.rotated.dir || '';
+      step(out.rotated.fallback
+        ? '旧登录档案被占着改不了名，换了一个全新目录'
+        : '上一代崩在 QQNT.dll，换了一份登录档案');
+    } else if (out.rotated && out.rotated.error) {
+      step('换登录档案没成：' + out.rotated.error);
+    }
   }
   // 用户亲手点的一键出码之后，之前攒下的「刷新失败」账不再算数
   // （不然界面上会一直挂着「刷新一直失败」这句错的提示）。
@@ -2713,16 +2732,36 @@ async function rotateLoginProfile(settings) {
   if (!dir) return null;
   const stamp = new Date().toTimeString().slice(0, 8).replace(/:/g, '');
   const bak = `${dir}.bak-${stamp}`;
-  try {
-    if (!existsSync(dir)) {
-      await fsp.mkdir(dir, { recursive: true });
-      return { ok: true, fresh: true, dir };
-    }
-    await fsp.rename(dir, bak);
-    await fsp.mkdir(dir, { recursive: true });
-  } catch (e) {
-    return { ok: false, dir, error: String((e && e.message) || e) };
+  if (!existsSync(dir)) {
+    try { await fsp.mkdir(dir, { recursive: true }); } catch { }
+    return { ok: true, fresh: true, dir };
   }
+  // 2026-11-27 22:14 实测：改名会撞 EPERM —— 旧一代哪怕只剩个僵尸进程，登录目录里
+  // 也还有被 QQ 打开着的文件，Windows 不让整个目录改名。所以：清进程 → 重试几次；
+  // 还是不行就换一个全新的目录名（--login 是可覆盖参数），不去碰那个被占着的旧目录。
+  let lastErr = '';
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      await fsp.rename(dir, attempt === 1 ? bak : `${dir}.bak-${stamp}-${attempt}`);
+      await fsp.mkdir(dir, { recursive: true });
+      lastErr = '';
+      break;
+    } catch (e) {
+      lastErr = String((e && e.message) || e);
+      await napcatKillResidualTree().catch(() => []);
+      await new Promise((r) => setTimeout(r, 1200));
+    }
+  }
+  if (lastErr) {
+    const fresh = `${path.dirname(dir)}${path.sep}login-${stamp}`;
+    try {
+      await fsp.mkdir(fresh, { recursive: true });
+      return { ok: true, fallback: true, dir: fresh, from: dir, error: lastErr };
+    } catch (e) {
+      return { ok: false, dir, error: `${lastErr}；换新目录也没成：${String((e && e.message) || e)}` };
+    }
+  }
+  const bakOut = bak;
   try {
     const parent = path.dirname(dir);
     const base = path.basename(dir) + '.bak-';
@@ -2731,8 +2770,12 @@ async function rotateLoginProfile(settings) {
       await fsp.rm(path.join(parent, n), { recursive: true, force: true }).catch(() => { });
     }
   } catch { }
-  return { ok: true, from: dir, to: bak };
+  return { ok: true, from: dir, to: bakOut };
 }
+
+// 用户点「一键出码」时如果换了登录档案（尤其是旧目录被占、改用全新目录那种），
+// 下一次 start 必须用这份新目录当 --login，否则又会去用那份已经被 QQ 崩坏的旧档案。
+let napcatLoginOverride = '';
 
 /**
  * 「起来了但要确认它真活着」——隐藏控制台起 NapCat 时踩过的坑（2026-11-27）：
@@ -2795,7 +2838,8 @@ async function napcatHostRun(settings, verb, extraArgs = []) {
     const leftovers = await napcatKillResidualTree().catch(() => []);
     if (leftovers && leftovers.length) await new Promise((r) => setTimeout(r, 2500));
     // 登录目录先验一遍：低完整性 → QQ 一起就崩，宁可用宿主默认 profile。
-    const safeLogin = await napcatLoginSafe(settings.napcatLogin);
+    // napcatLoginOverride：一键出码换档案时若旧目录被占、改用了全新目录，这里必须跟着换。
+    const safeLogin = await napcatLoginSafe(napcatLoginOverride || settings.napcatLogin);
     if (safeLogin.note) await noteLoginFallback(safeLogin.note);
     // 别的 NapCat 安装也登同一个号时会互相踢，只在事件里报一声（不杀别人的东西）。
     noteRivalNapcat(settings).catch(() => { });
