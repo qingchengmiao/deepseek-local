@@ -3984,6 +3984,31 @@ async function openQqPage() {
       if (nap.login && nap.login.ok && !wasLogin) { await paintShell(); toast('NapCat 登录上了：' + (nap.login.nick || '')); }
     }
   };
+  // 人工登录保障：没登录的时候每 5 秒问一次「这张码多新了」。
+  // 码换了就直接换 <img>（不重画整页，页面不闪）；码太旧就替人敲一次刷新 ——
+  // 但刷新会作废上一张码，人正在扫的时候换码害处更大，所以 60 秒最多换一次。
+  let kitNextAt = 0;
+  let kitLastNewAt = 0;
+  const pollLoginKit = async (force = false) => {
+    if (!force && Date.now() < kitNextAt) return null;
+    kitNextAt = Date.now() + 5000;
+    const kit = await api('/api/napcat/login-kit').catch(() => null);
+    if (!kit || kit.ok === false) return null;
+    DAY.kit = kit;
+    const img = body.querySelector('#qqQrImg');
+    if (img && kit.qr && kit.qr.hash && img.dataset.hash !== kit.qr.hash) {
+      img.src = kit.qr.dataUrl;
+      img.dataset.hash = kit.qr.hash;
+      if (DAY.qrSeen) { DAY.qrSeen.hash = kit.qr.hash; DAY.qrSeen.at = kit.qr.servedAt || Date.now(); DAY.qrSeen.count += 1; }
+    }
+    const meta = body.querySelector('#qqQrMeta');
+    if (meta && kit.hint) meta.textContent = kit.hint;
+    if (kit.needScan && kit.qrAgeSec > 150 && Date.now() - kitLastNewAt > 60000) {
+      kitLastNewAt = Date.now();
+      await api('/api/napcat/login-kit/new', { method: 'POST', body: {} }).catch(() => null);
+    }
+    return kit;
+  };
   const paintShell = async () => {
     await load();
     body.innerHTML = qqPageHtml();
@@ -4318,6 +4343,26 @@ async function openQqPage() {
         }
         return;
       }
+      if (act === 'napNewQr') {
+        const old = x.textContent;
+        x.disabled = true;
+        x.textContent = '正在换码…（最多十几秒）';
+        try {
+          const r = await api('/api/napcat/login-kit/new', { method: 'POST', body: {} }).catch(e => ({ ok: false, error: String(e.message || e) }));
+          if (r && r.ok) {
+            if (r.qr) {
+              DAY.napcat = { ...(DAY.napcat || {}), qr: r.qr };
+              DAY.qrSeen = { hash: r.qr.hash, at: r.qr.servedAt || Date.now(), count: (DAY.qrSeen ? DAY.qrSeen.count + 1 : 1) };
+            }
+            toast(`新码出来了（等了 ${Math.round((r.waitedMs || 0) / 1000)} 秒），扫这个`, 6000);
+            await paintShell();
+            DAY.qrNextAt = Date.now() + DAY.qrAutoMs;
+          } else {
+            toast('没换到新码：' + (r.error || (r.log && r.log.slice(-1)[0]) || '再点一次试试'), 7000);
+          }
+        } finally { x.disabled = false; x.textContent = old; }
+        return;
+      }
       if (act === 'qqPoll') {
         const r = await api('/api/qq/poll', { method: 'POST', body: {} });
         toast(r.skipped ? '跳过：' + r.skipped : `收到 ${r.fresh || 0} 条，回了 ${r.replied || 0} 条`);
@@ -4402,6 +4447,8 @@ async function openQqPage() {
     if (S.view !== 'qq') return;
     paintCountdown();
     if (DAY.qrNextAt && Date.now() >= DAY.qrNextAt) await refreshQr(false);
+    // 没登录的时候另有 5 秒一次的问询：码换了立刻换图，码旧了替人敲一次刷新
+    if (!(DAY.napcat && DAY.napcat.login && DAY.napcat.login.ok)) await pollLoginKit();
   }, 1000);
   // 5 秒一次：刷收发状态（不动二维码那张图），顺便把新进来的 QQ 消息弹成桌面通知
   DAY.liveTimer = setInterval(async () => {
@@ -5278,10 +5325,10 @@ function qqLiveHtml() {
         <div class="kv"><span>账号</span><span>${esc((nap.login && nap.login.nick) || '')}（${esc((nap.login && nap.login.uid) || '')}）· 掉线前登录过</span>
         <span>后端</span><span>${esc(nap.dir || '')} · 端口 ${esc(String(nap.port || ''))}</span>
         <span>掉线于</span><span>${esc(new Date(QQW.lostAt).toLocaleTimeString('zh-CN'))}${QQW.why ? ' · ' + esc(QQW.why) : ''}</span></div>
-        <div class="warn" style="margin-top:8px">NapCat 进程还在、也还说自己登录着，但发不出消息了（账号被踢或网络断了）。先「自动纠错」，不行就「重启 NapCat 出新码」再扫一次。</div>
+        <div class="warn" style="margin-top:8px">被踢了。NapCat 进程还在、也还说自己登录着，但消息已经发不出去了（账号被踢或网络断了）。点「重启 NapCat 出新码」，手机扫一下就回来——别等它自己好，它好不了。</div>
         <div class="qq-acts" style="margin-top:10px">
-          <button class="btn primary" data-x="napHealNow" title="立刻跑一轮自检：缺 OneBot 配置就补、登录态坏了就重置并提示重扫">自动纠错</button>
-          <button class="mini" data-x="napRestart" title="杀掉 NapCat 再重跑启动脚本，逼它出一张新码（会断开当前登录）">重启 NapCat 出新码</button>
+          <button class="btn primary" data-x="napRestart" title="杀掉 NapCat 再重跑启动脚本，逼它出一张新码（会断开当前登录）">重启 NapCat 出新码</button>
+          <button class="mini" data-x="napHealNow" title="补 OneBot 配置、按需重置登录态">自检修一下</button>
           <button class="mini" data-x="qqTest">测试连接</button>
         </div>
       </div>` : login ? `
@@ -5299,11 +5346,12 @@ function qqLiveHtml() {
       </div>` : qr ? `
       <div class="card-block"><h4>扫码登录</h4>
         <div class="qr-box"><img id="qqQrImg" data-hash="${esc((nap.qr && nap.qr.hash) || '')}" src="${qr}" alt="二维码">
-          <div class="muted">用手机 QQ 扫这个码</div>
-          ${nap.qr.fresh ? '' : `<div class="warn">这张码是 ${qrAgeText(nap.qr.mtime)}的，NapCat 没在出新码——扫码八成会失败。要么「刷新二维码」重新读一次，要么「重启 NapCat 出新码」（会先断开当前登录）。</div>`}
+          <div class="muted">用手机 QQ 扫这个码 · 这张是 <b>${qrAgeText(nap.qr.mtime)}</b>出的，有效期约 2 分钟 —— 扫之前看一眼时间。</div>
+          ${nap.qr.fresh ? '' : `<div class="warn">这张码已经 ${qrAgeText(nap.qr.mtime)}了，八成扫不动：点「换一张新码（不重启）」要一张新的。</div>`}
           ${qrMeta ? `<div class="muted" id="qqQrMeta">${qrMeta}</div>` : ''}
         </div>
         <div class="qq-acts qr-acts" style="margin-top:10px">
+          <button class="btn primary" data-x="napNewQr" title="让 NapCat 重出一张码。不重启、不换登录档案，等你扫">换一张新码（不重启）</button>
           <button class="mini" data-x="napRefresh">刷新二维码</button>
           <button class="mini" data-x="qqQrForce" title="停掉 NapCat 再拉起来，逼它出一张新码（会断开当前登录）">强制出新码</button>
           <button class="mini" data-x="qqTest">检查是否已登录</button>

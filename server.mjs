@@ -1996,6 +1996,75 @@ async function napcatRefreshQr(settings, { waitMs = 8000 } = {}) {
   return out;
 }
 
+/**
+ * 人工登录保障（2026-11-27 定下的方向）：被踢下线之后不再指望自动登录。
+ * 快速登录会被风控、账密登录要过手机确认、成功率都不稳 —— 用户要的是「我来了就能扫上」。
+ * 所以这边只保证两件事：① 手上那张码是新的；② 同时只有一代 QQ 在跑（两代抢 profile
+ * 会一起在 QQNT.dll 里 0x80000003 崩，一个码都不出）。
+ */
+const loginKeeper = {
+  lastRefreshAt: 0,   // 上一次真去敲 RefreshQRcode 的时刻
+  refreshes: 0,       // 累计换过几次码（给界面看，证明它一直在换）
+  lastError: '',
+  lastKickAt: 0,      // 最近一次判定「被踢下线」
+  kickReason: '',
+  lastQrHash: '',
+};
+
+/** 给界面看的「人工登录账本」：现在能不能扫、手上这张码多大了、还新不新 */
+async function napcatLoginKit(settings) {
+  const s = settings || (await loadSettings());
+  const st = await napcatHostState(s).catch(() => null);
+  const qr = await napcatQrOnly(s).catch(() => null);
+  const q = (qr && qr.qr) || null;
+  const ageSec = q ? Math.max(0, Math.round((Date.now() - Number(q.mtime || 0)) / 1000)) : -1;
+  const loggedIn = !!(st && st.loggedIn);
+  return {
+    ok: true,
+    loggedIn,
+    running: !!(st && st.running),
+    processCount: (st && st.processCount) || 0,
+    dir: (qr && qr.dir) || napcatShellRoot(s),
+    qr: q,
+    qrAgeSec: ageSec,
+    // NapCat 的码大约 2 分钟一换；超过 100 秒就当「快过期了」，别再让人扫它
+    qrUsable: !!(q && q.fresh && ageSec >= 0 && ageSec <= 100),
+    needScan: !loggedIn,
+    hint: loggedIn ? '已经登录着，不用扫'
+      : q ? (ageSec <= 100 ? `这张码 ${ageSec} 秒前刚出的，扫它` : `这张码已经 ${ageSec} 秒了，八成过期了 —— 点「换一张新码」`)
+        : '磁盘上还没有码：先点「启动 NapCat」，它出码要几十秒',
+    keeper: {
+      lastRefreshAt: loginKeeper.lastRefreshAt,
+      refreshes: loginKeeper.refreshes,
+      lastError: loginKeeper.lastError,
+      lastKickAt: loginKeeper.lastKickAt,
+      kickReason: loginKeeper.kickReason,
+    },
+  };
+}
+
+/** 换一张新码给人工扫：不重启、不换 profile，只敲 NapCat 的 RefreshQRcode。
+ * 已经登录着的号 NapCat 会拒绝刷新 —— 那种情况要用户明确点「强制出新码」（那会断开当前登录）。
+ */
+async function napcatNewQrForHuman(settings) {
+  const s = settings || (await loadSettings());
+  const r = await napcatRefreshQr(s, { waitMs: 15000 });
+  loginKeeper.lastRefreshAt = Date.now();
+  if (r.ok) {
+    loginKeeper.refreshes += 1;
+    loginKeeper.lastError = '';
+    loginKeeper.lastQrHash = (r.qr && r.qr.hash) || '';
+    evLog('napcat', 'info', '给人工扫码换了一张新码', { waitedMs: r.waitedMs, dir: r.dir }).catch(() => {});
+  } else {
+    loginKeeper.lastError = String(r.error || '').slice(0, 200);
+    evLog('napcat', 'warn', '换新码没成', { error: loginKeeper.lastError, dir: r.dir }).catch(() => {});
+  }
+  return {
+    ...r,
+    keeper: { lastRefreshAt: loginKeeper.lastRefreshAt, refreshes: loginKeeper.refreshes, lastError: loginKeeper.lastError },
+  };
+}
+
 // 真话探针：OneBot 说「已登录」不等于 QQ 账号在线。被 KickedOffLine 之后它照样报 login ok，
 // get_status 也照样 online:true（假在线），只有真去拉一次资料卡才会 130~250 ms 就 failed
 // （2026-11-26 22:30 实测：send_private_msg 回 1006514「网络连接异常」，get_status 却说一切正常）。
@@ -3016,29 +3085,28 @@ async function napcatHealOnce({ force = false } = {}) {
       }
       const down = Date.now() - healDown.since;
       const kicked = /KickedOffLine|登录已失效/.test(healDown.why);
-      // 不管是「被踢下线」还是日志里只有「账号状态变更为离线」，登录态都可能已经作废，
-      // 所以两种都先自己试一次：快速登录（本地凭据）→ 存过的账密（MD5）。
-      // 11-26 那次只有「账号状态变更为离线」，旧代码只认 KickedOffLine，于是一整夜一次都没试，卡了 6 小时。
-      // 最多试两次、两次之间隔 60 秒（重启过之后进程是新的，值得再试一次），再多就是招风控。
-      if (healDown.loginTries < 2 && down >= 20e3 && Date.now() - healDown.lastLoginTry > 60e3) {
-        healDown.loginTries += 1;
-        healDown.lastLoginTry = Date.now();
-        const a = await napcatAutoLogin(settings).catch(e => ({ ok: false, error: e.message }));
-        if (a.ok) {
-          healDown.since = 0; healDown.restarts = 0; healDown.why = ''; healDown.loginTries = 0;
-          healState.needLogin = false;
-          const msg = `${kicked ? '被踢下线' : '掉线'}，已用${a.how}自动登回去（${a.uin}）`;
-          actions.push(msg); healLog(msg);
-          return { ok: true, actions, state: { ...healState, status: { running: st.running, loggedIn: st.loggedIn, fails: st.fails, phase: st.phase } } };
-        }
-        healState.needCaptcha = a.needCaptcha || '';
-        healLog(`${kicked ? '被踢下线' : '掉线'}，自动登录没成${a.error ? '：' + a.error : ''}`);
-        // 要人过验证就把链接推出去（本地弹窗，因为 QQ 通道这时候自己是断的）
-        if (a.needCaptcha && Date.now() - healDown.lastNote > 5 * 60e3) {
-          healDown.lastNote = Date.now();
-          const a2 = `掉线 ${Math.round(down / 1000)} 秒，密码登录要手机确认：${a.needCaptcha}`;
-          actions.push(a2); healLog(a2);
-          toastLocal('QQ 掉线了，要在手机上确认', `点开这个链接确认登录：${a.needCaptcha}`);
+      // 2026-11-27：这里原来会自己试「快速登录 → 账密登录」。后来定下的方向是
+      // 不指望被踢之后自动登回来（快速登录会被风控、账密登录要过手机确认，成功率都不稳），
+      // 改成把力气全花在人工登录保障上：保证手上那张码是新的、且只有一代 QQ 在跑。
+      // napcatAutoLogin 仍留着，但只给用户手动点「快速登录」用，不再自己触发。
+      if (kicked && Date.now() - loginKeeper.lastKickAt > 10 * 60e3) {
+        loginKeeper.lastKickAt = Date.now();
+        loginKeeper.kickReason = String(healDown.why || '').slice(0, 200);
+        evLog('qq', 'warn', '被踢下线了，等人工扫码', { why: loginKeeper.kickReason, downSec: Math.round(down / 1000) }).catch(() => {});
+      }
+      // 人工登录保障：没登上去就让「磁盘上那张码」一直保持新鲜。
+      // NapCat 自己也会转码，但它转得慢半拍，经常是人凑过来时手上那张已经过期 —— 直接敲 RefreshQRcode。
+      {
+        const kq = await napcatQrOnly(settings).catch(() => null);
+        const kAge = kq && kq.qr ? Date.now() - Number(kq.qr.mtime || 0) : Infinity;
+        // 门槛放在 150 秒：NapCat 的码大约 2 分钟有效，超过这个数它本来也该换了。
+        // 不更激进是因为「刷新会作废上一张」—— 人正在扫的时候换码，害处比留着一张旧码大。
+        if (kAge > 150000 && Date.now() - loginKeeper.lastRefreshAt > 120e3) {
+          const rr = await napcatNewQrForHuman(settings).catch(e => ({ ok: false, error: e.message }));
+          const a = rr.ok
+            ? `没登录：码已经 ${Math.round(kAge / 1000)} 秒没换，敲了一次刷新，新码出来了`
+            : `没登录：码已经 ${Math.round(kAge / 1000)} 秒没换，刷新没成${rr.error ? '：' + rr.error : ''}`;
+          actions.push(a); healLog(a);
         }
       }
       // 没被踢（多半是网络断）时重启一次，值得一试；被踢就重启没意义，只会停在等扫码。
@@ -6983,6 +7051,24 @@ async function handleApi(req, res, url) {
       return sendJson(res, 200, await napcatRefreshQr(await loadSettings()));
     } catch (e) {
       return sendJson(res, 400, { ok: false, changed: false, error: e.message });
+    }
+  }
+
+  // 「人工登录保障」：不指望自动登录，只保证磁盘上那张码够新、页面看到的和磁盘上的一致。
+  if (pathname === '/api/napcat/login-kit' && method === 'GET') {
+    try {
+      return sendJson(res, 200, await napcatLoginKit(await loadSettings()));
+    } catch (e) {
+      return sendJson(res, 400, { ok: false, error: qqWhyText(e.message) });
+    }
+  }
+
+  if (pathname === '/api/napcat/login-kit/new' && method === 'POST') {
+    try {
+      return sendJson(res, 200, await napcatNewQrForHuman(await loadSettings()));
+    } catch (e) {
+      evLog('napcat', 'error', '换新码：抛错了', e.message).catch(() => {});
+      return sendJson(res, 400, { ok: false, error: qqWhyText(e.message) });
     }
   }
 
