@@ -2300,11 +2300,80 @@ function napcatHostExe(settings) {
   return '';
 }
 
-function napcatHostArgs(settings) {
+// ★ 登录目录的杀手（2026-11-27 连踩两晚，记在这儿别再踩）：
+//  目录只要继承了 Low 完整性标签（DSH 沙盒把工作区打成 Low，子目录跟着），
+//  QQ 就被拦着直接崩：弹「应用程序错误 0x00000003」、一条日志都不落，
+//  表现成「NapCat 起来了、二维码永远不出、3200 永远不通」。
+//  所以传 --login 之前先验一遍完整性标签，不行就退回宿主默认 profile（普通 Medium）。
+//  注意「只有 Local State」不算坏——正在用的默认 profile 有时看起来也只有一个文件。
+async function napcatLoginSafe(login) {
+  const dir = String(login || '').trim();
+  if (!dir) return { login: '', note: '' };
+  if (!existsSync(dir)) return { login: '', note: `登录目录 ${dir} 不存在，用宿主默认` };
+  if (await dirIsLowIntegrity(dir)) {
+    return { login: '', note: `登录目录 ${dir} 在低完整性标签下（QQ 会被拦着崩），用宿主默认` };
+  }
+  return { login: dir, note: '' };
+}
+
+const lastRivalNote = { at: 0, text: '' };
+// 同一台机器上别的 NapCat 安装（例如 NapCatOneKey）如果登了同一个号，会把我们这代的登录踢下线，
+// 表现成「刚扫码又被踢」。只报不杀 —— 那是用户自己装的东西。
+async function noteRivalNapcat(settings) {
+  const mine = String(settings.qqNapCatDir || '').trim().toLowerCase();
+  const ps = "Get-CimInstance Win32_Process | Where-Object { $_.Name -match '^(NapCatWinBootMain|DSLNapCatHost)\\.exe$' -or ($_.Name -eq 'QQ.exe' -and $_.CommandLine -match 'NapCat') } | ForEach-Object { $_.Name + '|' + [string]$_.CommandLine }";
+  const out = await new Promise((resolve) => {
+    try {
+      execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { timeout: 15000, windowsHide: true }, (err, stdout) => resolve(err ? '' : String(stdout || '')));
+    } catch { resolve(''); }
+  });
+  const rivals = String(out).split(/\r?\n/).map((s) => s.trim()).filter(Boolean).filter((line) => {
+    const low = line.toLowerCase();
+    if (low.startsWith('dslnapcathost.exe|')) return false;   // 我们自己的宿主
+    if (mine && low.includes(mine)) return false;             // 我们自己的 shell
+    return /napcat|shell/i.test(low);
+  });
+  if (!rivals.length) return [];
+  const text = rivals.slice(0, 3).join(' ;; ');
+  if (lastRivalNote.text === text && Date.now() - lastRivalNote.at < 30 * 60e3) return rivals;
+  lastRivalNote.at = Date.now();
+  lastRivalNote.text = text;
+  await evLog('napcat', 'warn', '还发现别的 NapCat 实例在跑（可能抢同一个 QQ 号）', text).catch(() => { });
+  return rivals;
+}
+
+const lastLoginNote = { at: 0, text: '' };
+async function noteLoginFallback(text) {
+  const now = Date.now();
+  if (lastLoginNote.text === text && now - lastLoginNote.at < 30 * 60e3) return;
+  lastLoginNote.at = now;
+  lastLoginNote.text = text;
+  await evLog('napcat', 'warn', '登录目录不能用，这次用宿主默认的', text).catch(() => { });
+}
+
+const lowIntegrityCache = new Map();
+async function dirIsLowIntegrity(dir) {
+  const key = String(dir || '').toLowerCase();
+  const hit = lowIntegrityCache.get(key);
+  if (hit && Date.now() - hit.at < 10 * 60e3) return hit.low;
+  const low = await new Promise((resolve) => {
+    try {
+      execFile('icacls', [dir], { timeout: 8000, windowsHide: true }, (err, stdout) => {
+        if (err) return resolve(false);
+        resolve(/Low Mandatory Level/i.test(String(stdout || '')));
+      });
+    } catch { resolve(false); }
+  });
+  lowIntegrityCache.set(key, { low, at: Date.now() });
+  return low;
+}
+
+// override 用来传「已经验过/纠过的登录目录」；传 { login: '' } 就是明确不传 --login。
+function napcatHostArgs(settings, override = null) {
   const args = [];
   const shell = String(settings.napcatShell || '').trim();
   if (shell) args.push('--shell', shell);
-  const login = String(settings.napcatLogin || '').trim();
+  const login = String((override && 'login' in override ? override.login : settings.napcatLogin) || '').trim();
   if (login) args.push('--login', login);
   args.push('--http-port', String(settings.napcatHttpPort || 3200));
   args.push('--ws-port', String(settings.napcatWsPort || 3201));
@@ -2362,7 +2431,7 @@ async function newestMtime(dir) {
  * 有时 QQ 进程起来了、NapCat 那层却完全不初始化：日志目录一个新文件都不落、3200 永远不通。
  * 这里盯 100 秒，没动静就清掉重来一次（只重试一次，不无限拉进程树）。
  */
-async function napcatStartWatch(settings, exe, logDir, stampBefore, extraArgs = []) {
+async function napcatStartWatch(settings, exe, logDir, stampBefore, startArgs = []) {
   const deadline = Date.now() + 100000;
   let moved = false;
   while (Date.now() < deadline) {
@@ -2377,7 +2446,7 @@ async function napcatStartWatch(settings, exe, logDir, stampBefore, extraArgs = 
   const killed = await napcatKillResidualTree().catch(() => []);
   await new Promise((r) => setTimeout(r, 2500));
   const stamp2 = await newestMtime(logDir);
-  await spawnHiddenConsole(exe, ['start', ...napcatHostArgs(settings), ...extraArgs], { cwd: path.dirname(exe) }).catch(() => { });
+  await spawnHiddenConsole(exe, ['start', ...startArgs], { cwd: path.dirname(exe) }).catch(() => { });
   await evLog('napcat', 'info', '已重试启动 NapCat', { killed, stamp2 }).catch(() => { });
   return { ok: false, retried: true, killed };
 }
@@ -2397,18 +2466,27 @@ async function napcatHostRun(settings, verb, extraArgs = []) {
     // 所以起之前先清残留、再等 2.5 秒。
     const leftovers = await napcatKillResidualTree().catch(() => []);
     if (leftovers && leftovers.length) await new Promise((r) => setTimeout(r, 2500));
+    // 登录目录先验一遍：低完整性 → QQ 一起就崩，宁可用宿主默认 profile。
+    const safeLogin = await napcatLoginSafe(settings.napcatLogin);
+    if (safeLogin.note) await noteLoginFallback(safeLogin.note);
+    // 别的 NapCat 安装也登同一个号时会互相踢，只在事件里报一声（不杀别人的东西）。
+    noteRivalNapcat(settings).catch(() => { });
+    const startArgs = [...napcatHostArgs(settings, { login: safeLogin.login }), ...extraArgs];
     // 起之前记下日志目录最新时间，用来判断这一代到底有没有真的跑起来。
     const logDir = path.join(String(settings.qqNapCatDir || '').trim() || 'D:\\NapCatDSL\\Shell', 'logs');
     const stampBefore = await newestMtime(logDir);
     try {
-      await spawnHiddenConsole(exe0, ['start', ...napcatHostArgs(settings), ...extraArgs], { cwd: path.dirname(exe0) });
+      await spawnHiddenConsole(exe0, ['start', ...startArgs], { cwd: path.dirname(exe0) });
     } catch (e) {
       return { ok: false, verb, error: String((e && e.message) || e), exe: exe0 };
     }
     // 起完盯一段时间：100 秒内日志目录没动静 = 这一代是死的，清掉重来一次。
     // 不 await（起一台要几分钟，等它就把接口卡住了）。
-    napcatStartWatch(settings, exe0, logDir, stampBefore, extraArgs).catch(() => { });
-    return { ok: true, verb, spawned: true, alreadyRunning: false, code: 0, exe: exe0, message: '已用隐藏控制台拉起' };
+    napcatStartWatch(settings, exe0, logDir, stampBefore, startArgs).catch(() => { });
+    return {
+      ok: true, verb, spawned: true, alreadyRunning: false, code: 0, exe: exe0,
+      loginFallback: safeLogin.note || '', message: '已用隐藏控制台拉起',
+    };
   }
   const exe = napcatHostExe(settings);
   if (!exe) return { ok: false, error: '没找到 DSLNapCatHost.exe（先跑 napcat/build.ps1 编译）', exe: '' };
