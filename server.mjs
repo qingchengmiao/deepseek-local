@@ -2065,6 +2065,35 @@ async function napcatNewQrForHuman(settings) {
   };
 }
 
+/**
+ * 人工登录保障的核心动作：没登录时替人盯着「磁盘上那张码」。
+ * 只在「NapCat 进程活着、但还没登上去」时才动手；刷新会作废上一张码，
+ * 所以 150 秒没换过才换，且两次之间至少隔 120 秒（人正在扫的时候换码比留张旧的更坏）。
+ * 返回一句「做了什么」；什么都没做返回空串。
+ * 2026-11-27：这段原来只写在自动纠错里，而自动纠错可以被 napcatAutoHeal=false 关掉 ——
+ * 关掉之后服务端就没人管码了，只剩界面开着时才刷新。人工登录保障不能依赖界面开着。
+ */
+async function napcatKeepQrFresh(settings = null) {
+  const s = settings || (await loadSettings());
+  const st = await napcatHostState(s).catch(() => null);
+  const alive = !!(
+    st &&
+    st.ok !== false &&
+    ((Number(st.processCount) || 0) > 0 || (Array.isArray(st.pids) && st.pids.length))
+  );
+  if (!alive) return '';
+  if (st.loggedIn) return '';
+  const kq = await napcatQrOnly(s).catch(() => null);
+  const kAge = kq && kq.qr ? Date.now() - Number(kq.qr.mtime || 0) : Infinity;
+  if (!(kAge > 150000)) return '';
+  if (Date.now() - loginKeeper.lastRefreshAt < 120e3) return '';
+  const rr = await napcatNewQrForHuman(s).catch((e) => ({ ok: false, error: e.message }));
+  const secs = Math.round(kAge / 1000);
+  return rr && rr.ok
+    ? `没登录：码已经 ${secs} 秒没换，敲了一次刷新，新码出来了`
+    : `没登录：码已经 ${secs} 秒没换，刷新没成${rr && rr.error ? '：' + rr.error : ''}`;
+}
+
 // 真话探针：OneBot 说「已登录」不等于 QQ 账号在线。被 KickedOffLine 之后它照样报 login ok，
 // get_status 也照样 online:true（假在线），只有真去拉一次资料卡才会 130~250 ms 就 failed
 // （2026-11-26 22:30 实测：send_private_msg 回 1006514「网络连接异常」，get_status 却说一切正常）。
@@ -3095,19 +3124,10 @@ async function napcatHealOnce({ force = false } = {}) {
         evLog('qq', 'warn', '被踢下线了，等人工扫码', { why: loginKeeper.kickReason, downSec: Math.round(down / 1000) }).catch(() => {});
       }
       // 人工登录保障：没登上去就让「磁盘上那张码」一直保持新鲜。
-      // NapCat 自己也会转码，但它转得慢半拍，经常是人凑过来时手上那张已经过期 —— 直接敲 RefreshQRcode。
+      // 逻辑抽到 napcatKeepQrFresh 里了 —— 因为它不该只活在自动纠错里（autoHeal 关掉时也得跑）。
       {
-        const kq = await napcatQrOnly(settings).catch(() => null);
-        const kAge = kq && kq.qr ? Date.now() - Number(kq.qr.mtime || 0) : Infinity;
-        // 门槛放在 150 秒：NapCat 的码大约 2 分钟有效，超过这个数它本来也该换了。
-        // 不更激进是因为「刷新会作废上一张」—— 人正在扫的时候换码，害处比留着一张旧码大。
-        if (kAge > 150000 && Date.now() - loginKeeper.lastRefreshAt > 120e3) {
-          const rr = await napcatNewQrForHuman(settings).catch(e => ({ ok: false, error: e.message }));
-          const a = rr.ok
-            ? `没登录：码已经 ${Math.round(kAge / 1000)} 秒没换，敲了一次刷新，新码出来了`
-            : `没登录：码已经 ${Math.round(kAge / 1000)} 秒没换，刷新没成${rr.error ? '：' + rr.error : ''}`;
-          actions.push(a); healLog(a);
-        }
+        const a = await napcatKeepQrFresh(settings).catch(() => '');
+        if (a) { actions.push(a); healLog(a); }
       }
       // 没被踢（多半是网络断）时重启一次，值得一试；被踢就重启没意义，只会停在等扫码。
       // 2026-11-27 实测：二维码还是新的 = 这边正等人扫码，不是「坏了」。这时候重启会拉起
@@ -3183,6 +3203,22 @@ function startHealLoop() {
     napcatHealOnce().catch(() => null);
   }, 90 * 1000);
   if (healTimer.unref) healTimer.unref();
+}
+
+/**
+ * 码保鲜定时器：跟自动纠错完全分开。
+ * 2026-11-27：自动纠错可以被 napcatAutoHeal=false 关掉，但「码是新的」这条承诺不能跟着关 ——
+ * 人过来扫码时界面可能根本没开。60 秒一轮很轻（一次进程状态 + 一次文件 mtime）。
+ */
+let qrKeeperTimer = null;
+function startQrKeeperLoop() {
+  if (qrKeeperTimer) return;
+  qrKeeperTimer = setInterval(() => {
+    napcatKeepQrFresh().catch(() => null);
+  }, 60 * 1000);
+  if (qrKeeperTimer.unref) qrKeeperTimer.unref();
+  // 起来 20 秒后先看一眼
+  setTimeout(() => { napcatKeepQrFresh().catch(() => null); }, 20 * 1000).unref?.();
 }
 
 // 群聊自学习：10 分钟抽一轮历史（只在实例在线、设了群、没关自动时才真干活）
@@ -8020,6 +8056,7 @@ async function main() {
 startQQBridge();
 startQqEvents();
   startHealLoop(); // 隔离实例的自动纠错（90 秒一轮，设置里 napcatAutoHeal 可关）
+  startQrKeeperLoop(); // 码保鲜（60 秒一轮，跟 autoHeal 无关：没登录就把过期的码换新，供人工扫）
   startLearnLoop(); // 群聊自学习：10 分钟抽一轮、跨周自动结算（设置里 learnAuto 可关）
   startEventsLoop(); // 事件提醒：30 秒一轮看有没有快到点的事（设置里 eventsEnabled 可关）
   startDiaryLoop(); // 日程表 + 日志：每 5 分钟看一眼，安静够了才自己写（设置里 diaryEnabled 可关）
