@@ -39,6 +39,7 @@ export function qqStages(d) {
     state, pickNew, saveQqSeen, qqRemember, qqConversation,
     qqImageAttachments, qqUserPrompt, chatOnce, qqSemanticParts,
     qqSendText, newMessage, saveConversation,
+    qqEnrichItem = null, // 补料：引用原文、文件本地路径、文本类文件预览（没有就跳过）
     sleep = ms => new Promise(r => setTimeout(r, ms)),
     now = Date.now, log = () => {},
     onConversation = null, // 每轮聊完的回调（事件系统在这里捞事件）
@@ -70,8 +71,31 @@ export function qqStages(d) {
         });
         ctx.staleSkipped = fresh.length - usableFresh.length;
         ctx.freshList = usableFresh;
-        ctx.usable = usableFresh.filter(item => item.text || (item.images && item.images.length));
+        // 「有内容可回」的判据：光有文字，或者是图片 / 文件 / 语音 / 视频 / 引用别人的某一句话。
+        // 少了后四种，纯文件消息和纯引用消息会被当成空消息直接丢掉（以前就是这样）。
+        ctx.usable = usableFresh.filter(item => item.text
+          || (item.images && item.images.length)
+          || (item.files && item.files.length)
+          || (item.records && item.records.length)
+          || (item.videos && item.videos.length)
+          || item.replyId);
         ctx.usableText = ctx.usable.slice(); // 阶段之间不改同一个数组
+      },
+    },
+    {
+      // 2. 补料：引用回复把被引用的原文取回来，文件/语音把本地路径和文本预览补上。
+      //    放在记账之前 —— 记账记的才是「补完料的、能看懂的那句话」。
+      name: 'enrich',
+      optional: true,
+      async run(ctx) {
+        if (!qqEnrichItem) return;
+        for (const item of ctx.usable) {
+          try {
+            await qqEnrichItem(ctx.cfg, item);
+          } catch (e) {
+            log('[QQ] 补料失败：' + e.message);
+          }
+        }
       },
     },
     {

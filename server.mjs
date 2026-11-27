@@ -64,7 +64,7 @@ import {
   patchEvent,
   scheduleText,
 } from './calendar.mjs';
-import { qqConfig, onebot, loginInfo, sendPrivate, sendGroup, friendHistory, groupHistory, pickNew, qqUserPrompt, eventToItem } from './qq.mjs';
+import { qqConfig, onebot, loginInfo, sendPrivate, sendGroup, friendHistory, groupHistory, pickNew, qqUserPrompt, eventToItem, getMessage, getFileInfo, flattenSegments } from './qq.mjs';
 import { createLearnService } from './learn-service.mjs';
 import { createUserLearnService, buildOwnProfileText } from './user-learn.mjs';
 import { createVectorIndex } from './vector-index.mjs';
@@ -1548,6 +1548,169 @@ async function qqImageAttachments(cfg, item, { limit = 4 } = {}) {
   return out;
 }
 
+// ---- 引用回复 / 文件 / 语音：把「他到底在回哪条」和「附了什么东西」补齐 ----
+// 之前 reply 段在 qq.mjs 里被整段丢掉，文件段只留一个 [文件] 空占位，模型什么都看不到。
+const QQ_FILE_MAX = 50 * 1024 * 1024;
+const QQ_TEXT_EXT = new Set(['.md', '.txt', '.json', '.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.py', '.ps1', '.sh', '.bat', '.cmd', '.csv', '.log', '.yml', '.yaml', '.ini', '.toml', '.html', '.css', '.xml', '.sql']);
+const QQ_FILE_MIME = {
+  '.md': 'text/markdown', '.txt': 'text/plain', '.json': 'application/json', '.csv': 'text/csv',
+  '.js': 'text/javascript', '.mjs': 'text/javascript', '.ts': 'text/typescript',
+  '.py': 'text/x-python', '.ps1': 'text/plain', '.log': 'text/plain',
+  '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp',
+  '.pdf': 'application/pdf', '.zip': 'application/zip',
+  '.mp3': 'audio/mpeg', '.m4a': 'audio/mp4', '.amr': 'audio/amr', '.ogg': 'audio/ogg', '.wav': 'audio/wav',
+  '.mp4': 'video/mp4', '.mov': 'video/quicktime',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+};
+function qqExtOf(name) {
+  const m = /(\.[a-z0-9]{1,8})$/i.exec(String(name || ''));
+  return m ? m[1].toLowerCase() : '';
+}
+function qqSafeName(s) {
+  return String(s || 'qq-file').replace(/[\\/:*?"<>|\r\n\t]/g, '_').slice(0, 80);
+}
+async function qqDebugLog(obj) {
+  await fsp.appendFile(path.join(DATA, 'qq-debug.jsonl'), JSON.stringify({ at: new Date().toISOString(), ...obj }) + '\n').catch(() => {});
+}
+
+// 被引用的那条消息：按 message_id 向 OneBot 要原文（get_msg 会连段数组一起给回来）
+const qqQuoteCache = new Map();
+async function qqResolveQuote(cfg, item) {
+  const id = String(item.replyId || '').trim();
+  if (!id) return null;
+  if (qqQuoteCache.has(id)) return qqQuoteCache.get(id);
+  let quote = null;
+  try {
+    const m = await getMessage(cfg, id);
+    if (m) {
+      quote = {
+        messageId: id,
+        uid: m.uid,
+        nick: m.nick,
+        time: m.time,
+        text: String(m.text || '').slice(0, 1000),
+        kinds: m.kinds || [],
+      };
+    }
+  } catch (e) {
+    await qqDebugLog({ stage: 'quote-fail', messageId: id, error: String(e && e.message || e).slice(0, 200) });
+  }
+  qqQuoteCache.set(id, quote);
+  if (qqQuoteCache.size > 200) qqQuoteCache.delete(qqQuoteCache.keys().next().value);
+  return quote;
+}
+
+/** 文件/语音/视频：请 OneBot 给本地路径（NapCat 会落到 temp 目录） */
+async function qqLocalOf(cfg, f, kind = 'file') {
+  const rec = f && typeof f === 'object' ? f : { file: String(f || '') };
+  const src = String(rec.file || rec.path || rec.url || '').trim();
+  let localPath = /^[a-zA-Z]:[\\/]/.test(src) || src.startsWith('\\\\') ? src : '';
+  let name = String(rec.name || rec.file_name || '').trim() || (src ? path.basename(src) : `${kind}-${Date.now()}`);
+  let size = Number(rec.size || rec.file_size || 0) || 0;
+  if (!localPath) {
+    try {
+      const got = await getFileInfo(cfg, rec.id || rec.file_id || src, name);
+      if (got) {
+        localPath = String(got.path || '');
+        name = String(got.name || name);
+        size = Number(got.size || size) || size;
+      }
+    } catch (e) {
+      await qqDebugLog({ stage: 'file-info-fail', kind, name, error: String(e && e.message || e).slice(0, 200) });
+    }
+  }
+  // 语音/视频没有 file_id 时退一步用 OneBot 自己的取法
+  if (!localPath && kind !== 'file' && src) {
+    const act = kind === 'record' ? 'get_record' : 'get_file';
+    const got = await onebot(cfg, act, { file: src, out_format: 'mp3' }, { timeoutMs: 20000 }).catch(() => null);
+    const d = (got && (got.data || got)) || {};
+    localPath = String(d.file || d.path || d.url || '');
+    name = String(d.file_name || d.name || name);
+    size = Number(d.file_size || d.size || size) || size;
+  }
+  return { localPath, name, size };
+}
+
+/** 把文件/语音/视频都落成附件（形状和网页上传一致），并把文本类内容塞一段进 item.text */
+async function qqMediaAttachments(cfg, item, { limit = 6 } = {}) {
+  const out = await qqImageAttachments(cfg, item, { limit: Math.min(4, limit) });
+  const extra = [];
+  const groups = [
+    ['file', (item.files || []).slice(0, limit)],
+    ['record', (item.records || []).slice(0, 2)],
+    ['video', (item.videos || []).slice(0, 1)],
+  ];
+  for (const [kind, list] of groups) {
+    for (const raw of list) {
+      try {
+        const f = raw && typeof raw === 'object' ? raw : { file: String(raw || '') };
+        const info = await qqLocalOf(cfg, f, kind);
+        if (!info.localPath) {
+          await qqDebugLog({ stage: 'attach-no-path', kind, name: info.name });
+          continue;
+        }
+        const st = await fsp.stat(info.localPath).catch(() => null);
+        if (!st || !st.isFile()) {
+          await qqDebugLog({ stage: 'attach-missing', kind, path: String(info.localPath).slice(0, 200) });
+          continue;
+        }
+        if (st.size > QQ_FILE_MAX) {
+          await qqDebugLog({ stage: 'attach-too-big', kind, name: info.name, size: st.size });
+          continue;
+        }
+        const ext = qqExtOf(info.name) || qqExtOf(info.localPath);
+        const mime = (kind === 'record' ? (QQ_FILE_MIME[ext] || 'audio/mpeg')
+          : kind === 'video' ? (QQ_FILE_MIME[ext] || 'video/mp4')
+            : (QQ_FILE_MIME[ext] || 'application/octet-stream'));
+        const uploadId = `${uid('u')}${ext || ''}`;
+        await fsp.copyFile(info.localPath, path.join(UPLOAD_DIR, uploadId));
+        extra.push({
+          kind,
+          name: qqSafeName(info.name || `${kind}-${extra.length + 1}`),
+          mime,
+          size: st.size,
+          uploadId,
+          url: `/api/uploads/${uploadId}`,
+          localPath: info.localPath,
+        });
+      } catch (e) {
+        await qqDebugLog({ stage: 'attach-fail', kind, error: String(e && e.message || e).slice(0, 200) });
+      }
+    }
+  }
+  return out.concat(extra.filter(x => { delete x.localPath; return true; }));
+}
+
+/** 处理一条消息之前补料：引用原文、文件本地路径、文本类文件的前几千字预览 */
+async function qqEnrichItem(cfg, item) {
+  if (!item || !cfg) return item;
+  const quote = await qqResolveQuote(cfg, item);
+  if (quote) item.quote = quote;
+  const previews = [];
+  for (const f of (item.files || [])) {
+    if (!f || typeof f !== 'object') continue;
+    const info = await qqLocalOf(cfg, f, 'file');
+    if (info.localPath) f.localPath = info.localPath;
+    if (info.name) f.name = info.name;
+    if (info.size) f.size = info.size;
+    const ext = qqExtOf(info.name || info.localPath);
+    if (!QQ_TEXT_EXT.has(ext) || !info.localPath) continue;
+    try {
+      const st = await fsp.stat(info.localPath);
+      if (!st.isFile() || st.size > 2 * 1024 * 1024) continue;
+      const raw = await fsp.readFile(info.localPath, 'utf8');
+      const body = String(raw || '').replace(/\r\n/g, '\n').slice(0, 6000);
+      if (body.trim()) previews.push(`【附件内容：${info.name}｜前 ${body.length} 字】\n${body}`);
+    } catch { /* 读不了就不塞 */ }
+  }
+  if (previews.length) {
+    item.text = String(item.text || '') + '\n\n' + previews.join('\n\n');
+  }
+  return item;
+}
+
 /** 轮询一次：拉新消息 → 接进会话 → 让模型回 → 发回 QQ */
 async function qqPollOnce({ reply = true } = {}) {
   const settings = await loadSettings();
@@ -1734,7 +1897,8 @@ function qqPipeline() {
     saveQqSeen,
     qqRemember,
     qqConversation,
-    qqImageAttachments,
+    qqImageAttachments: qqMediaAttachments,
+    qqEnrichItem,
     qqUserPrompt,
     chatOnce,
     qqSemanticParts,
