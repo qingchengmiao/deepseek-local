@@ -3908,7 +3908,7 @@ async function openQqPage() {
       DAY.napHostConf = { shell: st.settings.napcatShell || '', login: st.settings.napcatLogin || '' };
       DAY.pushConf = { enabled: st.settings.pushEnabled !== false, uid: st.settings.pushUid || '', heal: st.settings.napcatAutoHeal !== false };
     } else if (!DAY.napHostConf) {
-      DAY.napHostConf = { shell: 'D:\\\\NapCatDSL\\\\Shell', login: '' };
+      DAY.napHostConf = { shell: '', login: '' };
     }
     if (DAY.napcat && DAY.napcat.qr) {
       DAY.qrSeen = { hash: DAY.napcat.qr.hash, at: DAY.napcat.servedAt || Date.now(), count: 1 };
@@ -5310,7 +5310,7 @@ function qqLiveHtml() {
         </div>
       </div>` : `
       <div class="card-block"><h4>扫码登录</h4>
-        <div class="sub">还没拿到二维码。先点「启动 NapCat」，等它弹出登录窗口（或在 ${esc(nap.dir || 'D:\\NapCatOneKey')} 里跑「扫码登录.bat」），出码后点「刷新二维码」。</div>
+        <div class="sub">还没拿到二维码。先点「启动 NapCat」，等它把码刷出来（Shell 在 ${esc(nap.dir || 'DSL 自带的那个目录')}），出码后点「刷新二维码」。</div>
         <div class="qq-acts" style="margin-top:10px">
           <button class="btn primary" data-x="napStart">启动 NapCat</button>
           <button class="mini" data-x="napRefresh">刷新二维码</button>
@@ -5387,7 +5387,7 @@ function qqPageHtml() {
       <p class="tip" style="margin:2px 0 10px">跟 DSH 那个 echo 实例完全分开：自己的 Shell 副本、自己的 QQ 号、自己的端口（OneBot ${esc(String(DAY.napHost?.httpPort || 3200))} / ${esc(String(DAY.napHost?.wsPort || 3201))}）。</p>
       <div id="napHostBox" class="tip">还没读状态，点一下「刷新状态」。</div>
       <div class="qq-form">
-        <div class="field" style="grid-column:1/-1"><label>Shell 目录</label><input id="napShell" value="${esc(DAY.napHostConf?.shell || 'D:\\\\NapCatDSL\\\\Shell')}" placeholder="D:\\NapCatDSL\\Shell"></div>
+        <div class="field" style="grid-column:1/-1"><label>Shell 目录</label><input id="napShell" value="${esc(DAY.napHostConf?.shell || '')}" placeholder="留空 = 用 DSL 自带的那份（%LOCALAPPDATA%\\DeepSeekLocal\\napcat\\shell）"></div>
         <div class="field" style="grid-column:1/-1"><label>登录目录（留空＝宿主默认 <exe 同级>\\login）</label><input id="napLogin" value="${esc(DAY.napHostConf?.login || '')}" placeholder="留空即可"></div>
       </div>
       <div class="cal-form-foot" style="margin-top:10px">
@@ -5483,7 +5483,7 @@ function qqPageHtml() {
         <div class="field"><label>群号（可选）</label><input id="qqGroup" value="${esc(q.group || '')}" placeholder="填了发群"></div>
         <div class="field"><label>轮询间隔（秒）</label><input id="qqPollSec" type="number" min="2" max="60" value="${Math.round((q.pollMs || 5000) / 1000)}"></div>
         <div class="field"><label>怎么称呼对方</label><input id="qqCallName" value="${esc(q.callName || '对方')}" maxlength="20"></div>
-        <div class="field" style="grid-column:1/-1"><label>NapCat 目录</label><input id="qqNapDir" value="${esc(nap.dir || '')}" placeholder="D:\\NapCatOneKey"></div>
+        <div class="field" style="grid-column:1/-1"><label>NapCat 目录</label><input id="qqNapDir" value="${esc(nap.dir || '')}" placeholder="留空 = 跟 Shell 目录走"></div>
       </div>
       <div class="cal-form-foot" style="margin-top:10px"><button class="btn primary" data-x="qqSave" title="把 NapCat 地址、QQ 号、群号、轮询间隔和称呼写进本机 data/settings.json；下一轮轮询就按新设置走">保存 QQ 设置</button></div>
     </div>
