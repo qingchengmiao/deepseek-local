@@ -2009,6 +2009,11 @@ const loginKeeper = {
   lastKickAt: 0,      // 最近一次判定「被踢下线」
   kickReason: '',
   lastQrHash: '',
+  // 连续刷新失败几次。被踢之后 QQ 进程还在、但登录流程已经不跑了，
+  // 这时 RefreshQRcode 会一直报错、磁盘上那张旧码永远是旧的 —— 光刷新救不回来，
+  // 必须把这一代重启一次让登录流程重跑（见 napcatKeeperRecover）。
+  fails: 0,
+  lastRecoverAt: 0,
 };
 
 /** 给界面看的「人工登录账本」：现在能不能扫、手上这张码多大了、还新不新 */
@@ -2031,14 +2036,17 @@ async function napcatLoginKit(settings) {
     qrUsable: !!(q && q.fresh && ageSec >= 0 && ageSec <= 100),
     needScan: !loggedIn,
     hint: loggedIn ? '已经登录着，不用扫'
-      : q ? (ageSec <= 100 ? `这张码 ${ageSec} 秒前刚出的，扫它` : `这张码已经 ${ageSec} 秒了，八成过期了 —— 点「换一张新码」`)
-        : '磁盘上还没有码：先点「启动 NapCat」，它出码要几十秒',
+      : loginKeeper.fails >= 2 ? '刷新一直失败：它会自动重启一次 NapCat 换新码，等一两分钟'
+        : q ? (ageSec <= 100 ? `这张码 ${ageSec} 秒前刚出的，扫它` : `这张码已经 ${ageSec} 秒了，八成过期了 —— 点「换一张新码」`)
+          : '磁盘上还没有码：先点「启动 NapCat」，它出码要几十秒',
     keeper: {
       lastRefreshAt: loginKeeper.lastRefreshAt,
       refreshes: loginKeeper.refreshes,
       lastError: loginKeeper.lastError,
       lastKickAt: loginKeeper.lastKickAt,
       kickReason: loginKeeper.kickReason,
+      fails: loginKeeper.fails,
+      lastRecoverAt: loginKeeper.lastRecoverAt,
     },
   };
 }
@@ -2052,17 +2060,40 @@ async function napcatNewQrForHuman(settings) {
   loginKeeper.lastRefreshAt = Date.now();
   if (r.ok) {
     loginKeeper.refreshes += 1;
+    loginKeeper.fails = 0;
     loginKeeper.lastError = '';
     loginKeeper.lastQrHash = (r.qr && r.qr.hash) || '';
     evLog('napcat', 'info', '给人工扫码换了一张新码', { waitedMs: r.waitedMs, dir: r.dir }).catch(() => {});
   } else {
+    loginKeeper.fails += 1;
     loginKeeper.lastError = String(r.error || '').slice(0, 200);
-    evLog('napcat', 'warn', '换新码没成', { error: loginKeeper.lastError, dir: r.dir }).catch(() => {});
+    evLog('napcat', 'warn', '换新码没成', { error: loginKeeper.lastError, dir: r.dir, fails: loginKeeper.fails }).catch(() => {});
   }
   return {
     ...r,
-    keeper: { lastRefreshAt: loginKeeper.lastRefreshAt, refreshes: loginKeeper.refreshes, lastError: loginKeeper.lastError },
+    keeper: { lastRefreshAt: loginKeeper.lastRefreshAt, refreshes: loginKeeper.refreshes, lastError: loginKeeper.lastError, fails: loginKeeper.fails },
   };
+}
+
+/**
+ * 刷新救不回来的时候，重启这一代（让 QQ 的登录流程重跑一遍）。
+ * 场景：账号被踢下线，QQ 进程还在、但它不再重跑登录流程 —— 这时 RefreshQRcode 一直报
+ * 「QRCode Get Error」，磁盘上那张码永远是旧的，人来了也扫不上。只能重启。
+ * 闸：连续失败 2 次才动手、10 分钟最多一次（重启会把当前这代整个换掉，不能成环）。
+ */
+async function napcatKeeperRecover(settings) {
+  const s = settings || (await loadSettings());
+  if (loginKeeper.fails < 2) return '';
+  if (Date.now() - loginKeeper.lastRecoverAt < 10 * 60e3) return '';
+  loginKeeper.lastRecoverAt = Date.now();
+  const reason = loginKeeper.lastError || '';
+  loginKeeper.fails = 0;
+  evLog('napcat', 'warn', '码刷不出来了，重启一次 NapCat 让登录流程重跑', { error: reason }).catch(() => {});
+  const stop = await napcatHostRun(s, 'stop').catch((e) => ({ ok: false, error: e.message }));
+  await new Promise((r) => setTimeout(r, 2500));
+  const start = await napcatHostRun(s, 'start').catch((e) => ({ ok: false, error: e.message }));
+  if (start && start.ok) return '码刷不出来（刷新一直失败），已经重启一次 NapCat —— 等它出新码再扫';
+  return `码刷不出来，重启也没成：${(start && (start.error || start.message)) || (stop && stop.error) || '原因不明'}`;
 }
 
 /**
@@ -2082,7 +2113,16 @@ async function napcatKeepQrFresh(settings = null) {
     ((Number(st.processCount) || 0) > 0 || (Array.isArray(st.pids) && st.pids.length))
   );
   if (!alive) return '';
-  if (st.loggedIn) return '';
+  if (st.loggedIn) {
+    loginKeeper.fails = 0;
+    return '';
+  }
+  // 上一轮已经连续刷不出来 —— 说明刷新这条路已经死了（被踢之后 QQ 不再重跑登录流程），
+  // 再敲 RefreshQRcode 也只会在日志里刷同一行错，直接重启这一代。
+  if (loginKeeper.fails >= 2) {
+    const rec = await napcatKeeperRecover(s).catch((e) => '重启那步抛错了：' + e.message);
+    if (rec) return rec;
+  }
   const kq = await napcatQrOnly(s).catch(() => null);
   const kAge = kq && kq.qr ? Date.now() - Number(kq.qr.mtime || 0) : Infinity;
   if (!(kAge > 150000)) return '';
