@@ -14,7 +14,8 @@ Set sh = CreateObject("WScript.Shell")
 here = fso.GetParentFolderName(WScript.ScriptFullName)
 sh.CurrentDirectory = here
 
-exe = here & "\dist\DeepSeek-win32-x64\DeepSeek.exe"
+exe = sh.ExpandEnvironmentStrings("%LOCALAPPDATA%") & "\DeepSeekLocal\app\DeepSeek-win32-x64\DeepSeek.exe"
+If Not fso.FileExists(exe) Then exe = here & "\dist\DeepSeek-win32-x64\DeepSeek.exe"
 nodeExe = sh.ExpandEnvironmentStrings("%ProgramFiles%") & "\nodejs\node.exe"
 If Not fso.FileExists(nodeExe) Then nodeExe = "node"
 

@@ -1,11 +1,12 @@
-﻿# 在桌面和开始菜单放一个「DeepSeek」快捷方式
+# 在桌面和开始菜单放一个「DeepSeek」快捷方式
 # 优先指向打包好的应用（dist\DeepSeek-win32-x64\DeepSeek.exe）；
 # 没打包过就退回 启动应用.vbs（它会起 node 服务 + 打开浏览器应用窗口）。
 # 用法：powershell -ExecutionPolicy Bypass -File tools\install-shortcut.ps1
 $ErrorActionPreference = 'Stop'
 
 $appDir = Split-Path -Parent $PSScriptRoot
-$packagedExe = Join-Path $appDir 'dist\DeepSeek-win32-x64\DeepSeek.exe'
+$packagedExe = Join-Path $env:LOCALAPPDATA 'DeepSeekLocal\app\DeepSeek-win32-x64\DeepSeekLauncher.exe'
+if (-not (Test-Path $packagedExe)) { $packagedExe = Join-Path $appDir 'dist\DeepSeek-win32-x64\DeepSeekLauncher.exe' }
 $vbs = Join-Path $appDir '启动应用.vbs'
 $wscript = Join-Path $env:WINDIR 'System32\wscript.exe'
 $icon = Join-Path $appDir 'assets\app.ico'
@@ -20,8 +21,9 @@ if (Test-Path $packagedExe) {
   foreach ($lnkPath in $places) {
     $lnk = $shell.CreateShortcut($lnkPath)
     $lnk.TargetPath = $packagedExe
-    # --no-sandbox 是必须的：这台机器上 Chromium 沙箱初始化会让进程静默退出（表现为双击没反应）
-    $lnk.Arguments = '--no-sandbox'
+    # 现在指到 DeepSeekLauncher.exe：它负责清旧实例再拉 DeepSeek.exe，参数留空。
+    # （直跑 DeepSeek.exe 在这台机器上会以 0x80000003 退出，表现为双击没反应。）
+    $lnk.Arguments = ''
     $lnk.WorkingDirectory = Split-Path -Parent $packagedExe
     $lnk.IconLocation = "$packagedExe,0"
     $lnk.Description = 'DeepSeek 对话（本地版）'
