@@ -5348,8 +5348,23 @@ function qqLiveHtml() {
   const qrMeta = qrSeen
     ? `更新于 ${new Date(qrSeen.at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })} · ${qrSeen.count > 1 ? `第 ${qrSeen.count} 次刷新` : '首次读到的码'} · 约每 ${Math.round(DAY.qrAutoMs / 1000)} 秒自动刷新（<span id="qqQrCount">--:--</span>）`
     : '';
-  // 掉线优先：NapCat 仍报 login.ok=true，所以不能只看 login 去渲染「登录状态」这张卡
-  const qrBlock = dropped ? `
+  // 码优先：掉线时 NapCat 仍报 login.ok=true，但人扫的是码 —— 码出来了就得看得见。
+  // 2026-11-28 报「出新码后反复回到掉线界面不展示二维码」，就是这里把 dropped 排在了码前面。
+  // 只在「掉线中」或「压根没登录」时让码顶上去；真登录着（没掉线）照样显示登录卡片。
+  const qrFresh = !!(qr && nap.qr && nap.qr.fresh);
+  const qrFirst = qrFresh && (dropped || !login);
+  const qrBlock = qrFirst ? `
+      <div class="card-block"><h4>扫码登录 ${dropped ? '<span class="pill warn">掉线中 · 扫这个码回来</span>' : '<span class="pill warn">还没登录</span>'}</h4>
+        <div class="qr-box"><img id="qqQrImg" data-hash="${esc((nap.qr && nap.qr.hash) || '')}" src="${qr}" alt="二维码">
+          <div class="muted">用手机 QQ 扫这个码 · 这张是 <b>${qrAgeText(nap.qr.mtime)}</b>出的，有效期约 2 分钟 —— 扫之前看一眼时间。</div>
+          ${dropped ? `<div class="warn">掉线前是 ${esc((nap.login && nap.login.nick) || '')}${QQW.why ? '，原因：' + esc(QQW.why) : ''}。码已经出来了，扫一下就回来。</div>` : ''}
+          ${qrMeta ? `<div class="muted" id="qqQrMeta">${qrMeta}</div>` : ''}
+        </div>
+        <div class="qq-acts qr-acts" style="margin-top:10px">
+          <button class="mini" data-x="napOneQr" title="手上这张还新就直接给你；不新就先敲一次刷新；再不行就清干净重开一代。">换一张新码</button>
+          <button class="mini" data-x="qqTest">检查是否已登录</button>
+        </div>
+      </div>` : dropped ? `
       <div class="card-block"><h4>登录状态 <span class="pill warn">掉线了</span></h4>
         <div class="kv"><span>账号</span><span>${esc((nap.login && nap.login.nick) || '')}（${esc((nap.login && nap.login.uid) || '')}）· 掉线前登录过</span>
         <span>后端</span><span>${esc(nap.dir || '')} · 端口 ${esc(String(nap.port || ''))}</span>
