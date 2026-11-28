@@ -295,6 +295,9 @@ const QQ_VOICE_PROMPT = `【在 QQ 上跟熟人说话】手机打字，一条能
 转折放在前中段：先认一半，再说但书，别一条道走到黑才翻。
 情绪别拉满：感叹号一条最多一个，笑声词一个，emoji 不超过两个且放句尾。
 不写「值得注意的是」「综上所述」「希望对你有帮助」这类串场词，也不打清单、不加小标题。
+一条回复只用一个口气：损、劝、提醒，全揉在同一段话里说，别「先说笑 → 再讲道理 → 最后抛问题」分三段换腔。
+要提醒的事夹在话里带出来（「…你悠着点，别一上来就几个G」），别另起一段摆长辈口吻。
+整条就发一次，别自己拆成两三条发。
 收尾要么直接停，要么把话头抛回去，别总结自己刚说过的话。
 语气词少量放句尾：啊/吧/呢/呗/嘛，一条最多一两个；不用「典」「孝」「急了」这种带刺的。
 不知道就说不知道，说错了当场改口，别硬凑。`;
@@ -1968,15 +1971,12 @@ async function qqProcessItemsLegacy(list, { reply = true, settings, cfg } = {}) 
     try {
       const atts = await qqImageAttachments(cfg, item);
       const res = await chatOnce(conv, String(item.text || ''), settings, { attachments: atts, relay: item, mobile: true });
-      // 一句一条地发，中间留点间隔，像人打字
-      const parts = qqSemanticParts(res.answer, { maxParts: 3, paraMax: 140, lineMax: 90 });
+      // 一条回完就一条发出去：以前按段落拆成 2–3 条、每条隔 700ms，
+      // 手机上像两三个人接连说话，同一句话被读成两种口吻。
       const ids = [];
-      for (let i = 0; i < parts.length; i++) {
-        if (i) await new Promise(r => setTimeout(r, 700));
-        const sent = await qqSendText(parts[i]);
-        if (sent) ids.push(sent);
-      }
-      outs.push({ messageId: item.messageId, answer: res.answer.slice(0, 120), parts: parts.length, sentIds: ids });
+      const sent = await qqSendText(String(res.answer || '').trim());
+      if (sent) ids.push(sent);
+      outs.push({ messageId: item.messageId, answer: res.answer.slice(0, 120), parts: 1, sentIds: ids });
     } catch (e) {
       qqState.lastError = '回复失败：' + e.message;
       qqRemember({ dir: 'error', text: e.message });
@@ -5637,6 +5637,32 @@ async function buildMessages(conv, settings, { withTools = false } = {}) {
   const systemPrompt = [...styleParts, settings.selfTune === false ? '' : TUNE_INSTRUCTION, diaryText, ownPrompt, AI_EVENT_HINT].filter(Boolean).join('\n\n');
   if (systemPrompt) out.push({ role: 'system', content: systemPrompt });
   if (style) meta.style = style;
+
+  // ---- 情绪层胶水（v3.3 S1）：问本机 8789 的情绪服务，拿不到就当没装
+  // 只在 EMOTION_OFF!=='1' 时问；超时 1500ms；失败一律 fail-open，不挡对话。
+  if (process.env.EMOTION_OFF !== '1') {
+    const emotionUrl = process.env.EMOTION_URL || 'http://127.0.0.1:8789';
+    const probeText = String(lastUser?.content || '').slice(0, 300);
+    if (probeText) {
+      try {
+        const er = await fetch(`${emotionUrl}/emotion/analyze`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ messages: [{ role: 'user', content: probeText }] }),
+          signal: AbortSignal.timeout(1500),
+        });
+        if (er.ok) {
+          const ev = await er.json();
+          meta.emotion = { route: ev.route, tier: ev.tier || '', reason: ev.reason || '', score: ev.score || 0, card: ev.cardId || '' };
+          if (ev.block) out.push({ role: 'system', content: ev.block });
+        } else {
+          meta.warnings.push(`情绪层回了 HTTP ${er.status}`);
+        }
+      } catch (e) {
+        meta.warnings.push('情绪层没响应：' + e.message);
+      }
+    }
+  }
 
   // 技能包：跟在系统提示词后面，单独一条，别和活人感混成一大段
   bmMark('archive');
